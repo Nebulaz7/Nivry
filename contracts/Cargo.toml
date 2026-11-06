@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["registry", "agent-wallet"]
+# `integration-tests` is its own workspace root: it links the near-workspaces
+# host test harness, which must never be compiled for wasm32-unknown-unknown.
+exclude = ["integration-tests"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+# Minimum required by near-sdk 5.30.1. Tested toolchains are recorded in
+# contracts/README.md rather than pinned here, because this repository is built
+# on both a Windows host (wasm artifacts) and a WSL/Linux host (host tests).
+rust-version = "1.95"
+
+[workspace.dependencies]
+near-sdk = "5.30.1"
+near-contract-standards = "5.30.1"
+
+# WASM size/safety profile. `overflow-checks` stays on: this contract moves money.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+debug = false
+panic = "abort"
+overflow-checks = true

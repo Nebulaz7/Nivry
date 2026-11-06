@@ -1,0 +1,20 @@
+[package]
+name = "nivry-registry"
+description = "Nivry agent NFT registry: title, keyless-treasury factory, authority epochs and bounded execution grants."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = { workspace = true }
+near-contract-standards = { workspace = true }
+
+[dev-dependencies]
+# Enables `cargo test` on the host; near-sdk 5.x refuses to build for a
+# non-wasm, non-cargo-near target without this feature.
+near-sdk = { workspace = true, features = ["unit-testing"] }

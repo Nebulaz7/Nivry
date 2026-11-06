@@ -1,1 +1,14 @@
+# External agent skills (installed tooling, not project source)
 .agents/skills/
+
+# Rust build output. Unanchored so it covers the workspace root, the separate
+# integration-tests workspace, and any future crate.
+target/
+
+# Never commit secrets (HACKATHON.md: keys belong in environment variables)
+.env
+.env.*
+
+# OS noise
+.DS_Store
+Thumbs.db

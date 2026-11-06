@@ -1,0 +1,9 @@
+{
+  "schema_version": "1",
+  "name": "Docs Reporter",
+  "description": "Produces a repository documentation report.",
+  "runtime_hint": "hermes",
+  "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "task_kind": "docs_report_v1",
+  "manifest_uri": "https://example.invalid/bundles/docs-reporter.tar.gz"
+}

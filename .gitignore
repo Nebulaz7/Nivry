@@ -5,6 +5,12 @@
 # integration-tests workspace, and any future crate.
 target/
 
+# Node and TypeScript build outputs and dependencies across all packages and apps
+node_modules/
+dist/
+*.tsbuildinfo
+.npm/
+
 # Never commit secrets (HACKATHON.md: keys belong in environment variables)
 .env
 .env.*

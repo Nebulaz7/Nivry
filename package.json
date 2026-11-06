@@ -1,0 +1,15 @@
+{
+  "name": "nivry",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run --workspaces build",
+    "test": "npm run --workspaces test",
+    "lint": "npm run --workspaces lint"
+  }
+}
+

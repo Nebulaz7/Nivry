@@ -15,6 +15,10 @@ Scope for Day 3: the inline fixed-price market (list / cancel / buy), seller
 credits with pull-payment withdrawal, provisioning recovery in the safe direction,
 and the full `nft_transfer_call` lock and resolver with failure tests.
 
+Scope for Day 4: hardening only. No new features — an authority-path review
+([`AUTHORITY_MATRIX.md`](AUTHORITY_MATRIX.md)) plus adversarial tests, and fixes for
+the three defects that review found.
+
 ## Layout
 
 ```
@@ -28,6 +32,9 @@ contracts/
 
 The treasury is built and copied into `registry/res/` **before** the registry
 builds, because the factory embeds those bytes with `include_bytes!`.
+
+Read [`AUTHORITY_MATRIX.md`](AUTHORITY_MATRIX.md) for the per-method authority
+review: who may call each method, what state it requires, and the invariants.
 
 ## Toolchain
 
@@ -87,7 +94,7 @@ Current artifact sizes from a local build:
 | Artifact | Bytes | SHA-256 |
 | --- | --- | --- |
 | `nivry_agent_wallet.wasm` | 274,121 | `ce3b675e2b3d9ab5a11d8840f0e1cd48471438f6a418ddc3bafce21fca4d8e5e` |
-| `nivry_registry.wasm` | ~982,000 | changes per build; record per release |
+| `nivry_registry.wasm` | ~983,000 | changes per build; record per release |
 
 Hashes are recorded here as **local build observations only**. They are not
 evidence that any deployed account runs this code, and they must be re-verified
@@ -120,6 +127,7 @@ against on-chain bytecode before any immutability claim.
 | Sale price | exact attachment; no overpayment path | `buy_agent` |
 | Seller credit withdrawal | one unresolved withdrawal per account | `withdraw_sale_proceeds` |
 | `nft_transfer_call` | one unresolved call per token | `nft_transfer_call` |
+| `nft_transfer_call` gas | ≥ 60 TGas attached | `nft_transfer_call` |
 | Callback result read | ≤ 256 bytes | `promise_result_checked` |
 | Enumeration page | ≤ 100 tokens | `nft_tokens_for_owner` |
 | Manifest text charset | printable ASCII, excluding `"` and `\` | `Manifest::validate` |
@@ -256,3 +264,6 @@ Not stubbed, not silently downgraded — simply missing:
   because unlocking on an unproven receiver outcome would be worse.
 * `reconcile_provisioning` only completes a token. A genuinely failed creation
   batch stays `Uncertain` with the funding held by the registry.
+* **Client-facing:** `agent_info.owner_id` is `Option<AccountId>` — it is `null`
+  until the title is minted. Clients must render the provisioning case instead of
+  assuming a string.

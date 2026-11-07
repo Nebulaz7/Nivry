@@ -265,8 +265,10 @@ pub struct SellerCreditView {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentInfo {
     pub token_id: String,
-    /// Read from the NFT title, never a cached copy.
-    pub owner_id: AccountId,
+    /// Read from the NFT title, never a cached copy. `None` until provisioning
+    /// confirms and the title is actually minted, so the Create screen can render
+    /// an in-progress agent instead of failing.
+    pub owner_id: Option<AccountId>,
     pub treasury_account_id: AccountId,
     pub authority_epoch: u64,
     pub ownership_change_count: u64,
@@ -282,7 +284,7 @@ pub struct AgentInfo {
 }
 
 impl AgentRecord {
-    pub fn info(&self, token_id: String, owner_id: AccountId) -> AgentInfo {
+    pub fn info(&self, token_id: String, owner_id: Option<AccountId>) -> AgentInfo {
         AgentInfo {
             token_id,
             owner_id,

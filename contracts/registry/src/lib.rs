@@ -61,6 +61,10 @@ pub const SETTLE_GAS: Gas = Gas::from_tgas(25);
 pub const STATUS_GAS: Gas = Gas::from_tgas(20);
 /// Gas handed to the `nft_on_transfer` receiver. The resolver is funded separately.
 pub const RECEIVER_GAS: Gas = Gas::from_tgas(25);
+/// Minimum gas a caller must attach to `nft_transfer_call`: the receiver call, the
+/// resolver, and the receipts around them. Below this the resolver can starve and
+/// leave the agent locked with no outcome.
+pub const MIN_TRANSFER_CALL_GAS: Gas = Gas::from_tgas(60);
 /// Gas for the fixed `treasury_info` query used by provisioning recovery.
 pub const PROVISIONING_STATUS_GAS: Gas = Gas::from_tgas(20);
 
@@ -900,6 +904,12 @@ impl Registry {
             listing.listing_id == listing_id,
             "listing_id does not match the live listing"
         );
+        // Defence in depth: `internal_transfer` would reject this anyway, but with a
+        // misleading "sender not approved" panic.
+        require!(
+            listing.seller == self.current_owner(&token_id),
+            "the listed seller is no longer the token owner"
+        );
         require!(
             agent.authority_epoch == expected_epoch,
             "expected_epoch is stale"
@@ -1294,6 +1304,10 @@ impl Registry {
             env::attached_deposit() == ONE_YOCTO,
             "Requires attached deposit of exactly 1 yoctoNEAR"
         );
+        require!(
+            env::prepaid_gas() >= MIN_TRANSFER_CALL_GAS,
+            "attach at least 60 TGas for nft_transfer_call"
+        );
 
         let mut agent = self.load_agent(&token_id);
         self.require_ready_idle(&agent);
@@ -1458,10 +1472,14 @@ impl Registry {
     }
 
     /// Full passport for one agent.
+    ///
+    /// Deliberately does not require the title to exist: during provisioning (and
+    /// when provisioning failed or is uncertain) the token is reserved but not yet
+    /// minted, and clients must still be able to read that state.
     pub fn agent_info(&self, token_id: String) -> AgentInfo {
         let agent = self.load_agent(&token_id);
-        let owner = self.current_owner(&token_id);
-        agent.info(token_id, owner)
+        let owner_id = self.tokens.owner_by_id.get(&token_id);
+        agent.info(token_id, owner_id)
     }
 
     /// Exact deposit required by `create_agent`, published rather than hidden.
@@ -2497,5 +2515,116 @@ mod tests {
             .load_agent(&"1".to_owned())
             .pending_transfer_call
             .is_none());
+    }
+
+    // ---- day 4: adversarial passes --------------------------------------
+
+    #[test]
+    fn agent_info_is_readable_before_the_title_exists() {
+        testing_env!(env_as(OWNER).build());
+        let mut registry = Registry::new(account(OWNER));
+        let mut record = record();
+        record.lifecycle = Lifecycle::Provisioning;
+        registry.agents.insert("1".to_owned(), record);
+
+        let info = registry.agent_info("1".to_owned());
+        assert!(info.owner_id.is_none(), "no title exists yet");
+        assert_eq!(info.lifecycle, Lifecycle::Provisioning);
+        assert_eq!(info.treasury_account_id, account(TREASURY));
+    }
+
+    #[test]
+    #[should_panic(expected = "agent has no authorized executor")]
+    fn a_grant_does_not_revive_when_the_token_returns_to_its_first_owner() {
+        let mut registry = authorized();
+
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        registry.nft_transfer(account(BUYER), "1".to_owned(), None, None);
+
+        testing_env!(env_as(BUYER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        registry.nft_transfer(account(OWNER), "1".to_owned(), None, None);
+
+        // Back at the original owner, but two generations later and with no grant.
+        let agent = registry.load_agent(&"1".to_owned());
+        assert_eq!(agent.authority_epoch, 4);
+        assert!(agent.executor_grant.is_none());
+
+        testing_env!(env_as(EXECUTOR).build());
+        registry
+            .execute_payment(
+                "1".to_owned(),
+                account(OWNER),
+                4,
+                1,
+                account(RECIPIENT),
+                U128(10),
+                U64(4_000_000_000),
+            )
+            .detach();
+    }
+
+    #[test]
+    fn treasury_addresses_are_derived_per_token() {
+        let first = Registry::derive_treasury_account_id(&account(REGISTRY), 1);
+        let second = Registry::derive_treasury_account_id(&account(REGISTRY), 2);
+        assert_ne!(first, second);
+        assert!(first.as_str().starts_with("00000001."));
+        assert!(second.as_str().starts_with("00000002."));
+    }
+
+    #[test]
+    fn each_agent_reports_only_its_own_treasury() {
+        let mut registry = ready_registry();
+        let first = registry.treasury_account_id("1".to_owned());
+
+        let mut second = record();
+        second.treasury_account_id = account("00000002.registry.test.near");
+        registry.agents.insert("2".to_owned(), second);
+        let second_id = registry.treasury_account_id("2".to_owned());
+
+        assert_ne!(first, second_id);
+        assert_eq!(first, account(TREASURY));
+    }
+
+    #[test]
+    #[should_panic(expected = "attach at least 60 TGas")]
+    fn a_transfer_call_requires_enough_gas() {
+        let mut registry = authorized();
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .prepaid_gas(Gas::from_tgas(10))
+            .build());
+        let outcome = registry.nft_transfer_call(
+            account("receiver.test.near"),
+            "1".to_owned(),
+            None,
+            None,
+            "msg".to_owned(),
+        );
+        if let PromiseOrValue::Promise(promise) = outcome {
+            promise.detach();
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "the listed seller is no longer the token owner")]
+    fn buying_rejects_a_listing_whose_seller_is_not_the_owner() {
+        let mut registry = listed_registry(5_000);
+        let hash = manifest_hash(&registry);
+
+        let mut agent = registry.load_agent(&"1".to_owned());
+        if let Some(listing) = agent.listing.as_mut() {
+            listing.seller = account(BUYER);
+        }
+        registry.agents.insert("1".to_owned(), agent);
+
+        testing_env!(env_as(BUYER)
+            .attached_deposit(NearToken::from_yoctonear(5_000))
+            .build());
+        registry.buy_agent("1".to_owned(), 1, 2, hash);
     }
 }

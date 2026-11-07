@@ -7,7 +7,10 @@ import {
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { DatabaseService, type StoredTaskRow } from '../database/database.service';
+import {
+  DatabaseService,
+  type StoredTaskRow,
+} from '../database/database.service';
 
 export const SUPPORTED_TASK_KIND = 'docs_report_v1';
 export const MAX_TASK_FILES = 50;
@@ -42,8 +45,14 @@ export class TaskRunnerService {
    * task is currently running for the same token.
    */
   async submitAndRunTask(input: SubmitTaskInput): Promise<StoredTaskRow> {
-    if (!input?.token_id || typeof input.token_id !== 'string' || input.token_id.length > 64) {
-      throw new BadRequestException('Valid token_id (1..=64 bytes) is required');
+    if (
+      !input?.token_id ||
+      typeof input.token_id !== 'string' ||
+      input.token_id.length > 64
+    ) {
+      throw new BadRequestException(
+        'Valid token_id (1..=64 bytes) is required',
+      );
     }
     if (input.task_kind !== SUPPORTED_TASK_KIND) {
       throw new BadRequestException(
@@ -54,15 +63,17 @@ export class TaskRunnerService {
     const fixtureSubpath = input.fixture_subpath || 'sample-repo';
     const targetDir = this.resolveAllowlistedFixtureDir(fixtureSubpath);
 
-    const existingRunning = this.db
-      .listTasksForToken(input.token_id)
-      .some((t) => t.status === 'running');
+    const existingRunning = (
+      await this.db.listTasksForToken(input.token_id)
+    ).some((t) => t.status === 'running');
     if (existingRunning) {
-      throw new ConflictException(`Agent token ${input.token_id} already has a running task`);
+      throw new ConflictException(
+        `Agent token ${input.token_id} already has a running task`,
+      );
     }
 
     const taskId = `task_${randomUUID().replace(/-/g, '').slice(0, 24)}`;
-    this.db.createTask({
+    await this.db.createTask({
       task_id: taskId,
       token_id: input.token_id,
       task_kind: SUPPORTED_TASK_KIND,
@@ -71,9 +82,12 @@ export class TaskRunnerService {
       },
     });
 
-    const claimed = this.db.claimPendingTask(taskId);
+    const claimed = await this.db.claimPendingTask(taskId);
     if (!claimed) {
-      throw new ConflictException(`Could not claim task ${taskId} for token ${input.token_id}`);
+      await this.db.cancelTask(taskId);
+      throw new ConflictException(
+        `Could not claim task ${taskId} for token ${input.token_id}`,
+      );
     }
 
     try {
@@ -81,29 +95,32 @@ export class TaskRunnerService {
         () => Promise.resolve(this.executeHermesDocsReport(targetDir)),
         DEFAULT_TASK_TIMEOUT_MS,
       );
-      return this.db.completeTask(taskId, output as unknown as Record<string, unknown>)!;
+      return (await this.db.completeTask(
+        taskId,
+        output as unknown as Record<string, unknown>,
+      ))!;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return this.db.failTask(taskId, message)!;
+      return (await this.db.failTask(taskId, message))!;
     }
   }
 
-  getTask(taskId: string): StoredTaskRow {
-    const row = this.db.getTask(taskId);
+  async getTask(taskId: string): Promise<StoredTaskRow> {
+    const row = await this.db.getTask(taskId);
     if (!row) {
       throw new NotFoundException(`Task ${taskId} not found`);
     }
     return row;
   }
 
-  cancelTask(taskId: string): StoredTaskRow {
-    const row = this.getTask(taskId);
+  async cancelTask(taskId: string): Promise<StoredTaskRow> {
+    const row = await this.getTask(taskId);
     if (row.status === 'completed' || row.status === 'failed') {
-      throw new BadRequestException(`Cannot cancel terminal task in status "${row.status}"`);
+      throw new BadRequestException(
+        `Cannot cancel terminal task in status "${row.status}"`,
+      );
     }
-    row.status = 'cancelled';
-    row.completed_at = new Date().toISOString();
-    return row;
+    return (await this.db.cancelTask(taskId))!;
   }
 
   /**
@@ -126,7 +143,9 @@ export class TaskRunnerService {
 
     const targetDir = resolve(this.fixturesRoot, subpath);
     if (!targetDir.startsWith(this.fixturesRoot)) {
-      throw new BadRequestException('Fixture path escapes allowlisted fixtures root');
+      throw new BadRequestException(
+        'Fixture path escapes allowlisted fixtures root',
+      );
     }
     if (!existsSync(targetDir) || !statSync(targetDir).isDirectory()) {
       throw new BadRequestException(`Fixture directory not found: ${subpath}`);
@@ -188,7 +207,9 @@ export class TaskRunnerService {
     ];
 
     for (const s of sections) {
-      reportLines.push(`### \`${s.file}\` (${s.lines} lines, ${s.bytes} bytes)`);
+      reportLines.push(
+        `### \`${s.file}\` (${s.lines} lines, ${s.bytes} bytes)`,
+      );
       if (s.exports.length > 0) {
         reportLines.push('- Exported functions:');
         for (const fn of s.exports) {
@@ -201,7 +222,9 @@ export class TaskRunnerService {
     }
 
     const reportMarkdown = reportLines.join('\n');
-    const outputSha256 = createHash('sha256').update(reportMarkdown, 'utf8').digest('hex');
+    const outputSha256 = createHash('sha256')
+      .update(reportMarkdown, 'utf8')
+      .digest('hex');
 
     return {
       task_kind: SUPPORTED_TASK_KIND,
@@ -213,7 +236,10 @@ export class TaskRunnerService {
     };
   }
 
-  private async runWithTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Promise<T> {
+  private async runWithTimeout<T>(
+    fn: () => Promise<T>,
+    timeoutMs: number,
+  ): Promise<T> {
     let timer: NodeJS.Timeout | undefined;
     try {
       return await Promise.race([

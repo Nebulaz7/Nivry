@@ -6,9 +6,17 @@ describe('TaskRunnerService', () => {
   let db: DatabaseService;
   let service: TaskRunnerService;
 
-  beforeEach(() => {
+  beforeAll(() => {
     db = new DatabaseService();
     service = new TaskRunnerService(db);
+  });
+
+  beforeEach(async () => {
+    await db.resetForTests();
+  });
+
+  afterAll(async () => {
+    await db.onModuleDestroy();
   });
 
   it('runs docs_report_v1 against fixtures/sample-repo and produces deterministic output_sha256', async () => {
@@ -52,13 +60,13 @@ describe('TaskRunnerService', () => {
   });
 
   it('enforces bounded concurrency per token', async () => {
-    const pending = db.createTask({
+    const pending = await db.createTask({
       task_id: 'task_running_1',
       token_id: '1',
       task_kind: 'docs_report_v1',
       input: {},
     });
-    db.claimPendingTask(pending.task_id);
+    await db.claimPendingTask(pending.task_id);
 
     await expect(
       service.submitAndRunTask({
@@ -68,4 +76,3 @@ describe('TaskRunnerService', () => {
     ).rejects.toThrow(ConflictException);
   });
 });
-

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS events (
     event_version VARCHAR(16) NOT NULL,
     event_name VARCHAR(64) NOT NULL,
     authority_epoch BIGINT,
+    category VARCHAR(32) NOT NULL,
     data JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_event_log UNIQUE (receipt_id, log_index)
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_token_id ON tasks (token_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tasks_one_running_per_token ON tasks (token_id) WHERE status = 'running';
 
 CREATE TABLE IF NOT EXISTS operation_projections (
     operation_id VARCHAR(64) PRIMARY KEY,

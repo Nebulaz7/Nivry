@@ -1,4 +1,8 @@
-import { BadGatewayException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadGatewayException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 
 export type Lifecycle = 'provisioning' | 'ready' | 'failed' | 'uncertain';
 export type OperationKind = 'executor_payment' | 'owner_withdraw';
@@ -109,7 +113,8 @@ export class ChainReaderService {
 
   constructor() {
     this.rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.testnet.near.org';
-    this.registryContractId = process.env.REGISTRY_CONTRACT_ID || 'registry.nivry.testnet';
+    this.registryContractId =
+      process.env.REGISTRY_CONTRACT_ID || 'registry.nivry.testnet';
   }
 
   getRegistryContractId(): string {
@@ -120,44 +125,70 @@ export class ChainReaderService {
    * Calls a finalized view method on the Registry contract.
    */
   async getAgentInfo(tokenId: string): Promise<AgentInfoView> {
-    return this.callViewMethod<AgentInfoView>(this.registryContractId, 'agent_info', {
-      token_id: tokenId,
-    });
+    return this.callViewMethod<AgentInfoView>(
+      this.registryContractId,
+      'agent_info',
+      {
+        token_id: tokenId,
+      },
+    );
   }
 
   async getProvisioningCost(): Promise<string> {
-    return this.callViewMethod<string>(this.registryContractId, 'provisioning_cost', {});
+    return this.callViewMethod<string>(
+      this.registryContractId,
+      'provisioning_cost',
+      {},
+    );
   }
 
   async getWalletCodeHash(): Promise<string> {
-    return this.callViewMethod<string>(this.registryContractId, 'wallet_code_hash', {});
+    return this.callViewMethod<string>(
+      this.registryContractId,
+      'wallet_code_hash',
+      {},
+    );
   }
 
   async getNextTokenId(): Promise<number> {
-    return this.callViewMethod<number>(this.registryContractId, 'next_token_id', {});
+    return this.callViewMethod<number>(
+      this.registryContractId,
+      'next_token_id',
+      {},
+    );
   }
 
   /**
    * Calls finalized view methods on a keyless child Treasury contract.
    */
   async getTreasuryInfo(treasuryAccountId: string): Promise<TreasuryInfoView> {
-    return this.callViewMethod<TreasuryInfoView>(treasuryAccountId, 'treasury_info', {});
+    return this.callViewMethod<TreasuryInfoView>(
+      treasuryAccountId,
+      'treasury_info',
+      {},
+    );
   }
 
   async getOperationStatus(
     treasuryAccountId: string,
     operationId: string,
   ): Promise<OperationView | null> {
-    return this.callViewMethod<OperationView | null>(treasuryAccountId, 'operation_status', {
-      operation_id: operationId,
-    });
+    return this.callViewMethod<OperationView | null>(
+      treasuryAccountId,
+      'operation_status',
+      {
+        operation_id: operationId,
+      },
+    );
   }
 
   /**
    * Verifies whether an on-chain account has zero access keys and deployed code (PLAN.md §6).
    * Always returns 'development/unverified' unless keys list is empty and code is present.
    */
-  async verifyAccountLockState(accountId: string): Promise<AccountLockVerification> {
+  async verifyAccountLockState(
+    accountId: string,
+  ): Promise<AccountLockVerification> {
     const [accountRes, keysRes] = await Promise.all([
       this.rpcRequest<{
         amount: string;
@@ -190,7 +221,10 @@ export class ChainReaderService {
       code_hash: accountRes.code_hash,
       key_count: keyCount,
       is_keyless: isKeyless,
-      verification_label: isKeyless && hasContractCode ? 'locked_release' : 'development/unverified',
+      verification_label:
+        isKeyless && hasContractCode
+          ? 'locked_release'
+          : 'development/unverified',
     };
   }
 
@@ -244,12 +278,21 @@ export class ChainReaderService {
     receiptsOutcome: Array<{
       id: string;
       block_hash: string;
-      outcome: { executor_id: string; logs: string[] };
+      outcome: {
+        executor_id: string;
+        logs: string[];
+        status?: Record<string, unknown>;
+      };
     }>,
   ): ParsedNep297Event[] {
     const events: ParsedNep297Event[] = [];
 
     for (const receipt of receiptsOutcome) {
+      // A failed receipt can still carry logs written before the panic. Its state changes
+      // were rolled back, so its events must never be treated as facts.
+      if (receipt.outcome?.status && 'Failure' in receipt.outcome.status) {
+        continue;
+      }
       const logs = receipt.outcome?.logs || [];
       for (let logIndex = 0; logIndex < logs.length; logIndex++) {
         const line = logs[logIndex];
@@ -264,7 +307,11 @@ export class ChainReaderService {
             event?: string;
             data?: unknown;
           };
-          if (parsed && typeof parsed.standard === 'string' && typeof parsed.event === 'string') {
+          if (
+            parsed &&
+            typeof parsed.standard === 'string' &&
+            typeof parsed.event === 'string'
+          ) {
             events.push({
               receipt_id: receipt.id,
               executor_id: receipt.outcome.executor_id,
@@ -286,6 +333,22 @@ export class ChainReaderService {
   }
 
   /**
+   * Reads the finalized height and timestamp of a block, so event ordering never depends
+   * on values supplied by an API caller.
+   */
+  async getBlockInfo(
+    blockHash: string,
+  ): Promise<{ height: number; timestamp_ns: string }> {
+    const block = await this.rpcRequest<{
+      header: { height: number; timestamp_nanosec: string };
+    }>('block', { block_id: blockHash });
+    return {
+      height: block.header.height,
+      timestamp_ns: String(block.header.timestamp_nanosec),
+    };
+  }
+
+  /**
    * Executes a finalized `call_function` RPC query and decodes the UTF-8 JSON response.
    */
   async callViewMethod<T>(
@@ -293,7 +356,9 @@ export class ChainReaderService {
     methodName: string,
     args: Record<string, unknown>,
   ): Promise<T> {
-    const argsBase64 = Buffer.from(JSON.stringify(args), 'utf8').toString('base64');
+    const argsBase64 = Buffer.from(JSON.stringify(args), 'utf8').toString(
+      'base64',
+    );
 
     const response = await this.rpcRequest<{
       result: number[];
@@ -311,7 +376,10 @@ export class ChainReaderService {
     return JSON.parse(decoded) as T;
   }
 
-  async rpcRequest<T>(method: string, params: Record<string, unknown>): Promise<T> {
+  async rpcRequest<T>(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<T> {
     let response: Response;
     try {
       response = await fetch(this.rpcUrl, {
@@ -352,7 +420,9 @@ export class ChainReaderService {
         errorData.includes('does not exist') ||
         errorData.includes('unknown token')
       ) {
-        throw new NotFoundException(`On-chain resource not found: ${errorData || causeName}`);
+        throw new NotFoundException(
+          `On-chain resource not found: ${errorData || causeName}`,
+        );
       }
       throw new BadGatewayException(
         `NEAR RPC error (${causeName || 'Error'}): ${payload.error.message || errorData}`,
@@ -366,4 +436,3 @@ export class ChainReaderService {
     return payload.result;
   }
 }
-

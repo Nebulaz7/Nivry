@@ -10,4 +10,3 @@ import { PassportController } from './passport.controller';
   exports: [EventProjectionService],
 })
 export class PassportModule {}
-

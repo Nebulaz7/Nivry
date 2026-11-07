@@ -41,12 +41,21 @@ export interface PackedBundleResult {
  * Patterns that must never appear in a public sanitized agent bundle (PLAN.md §12, §18).
  */
 const FORBIDDEN_SECRET_PATTERNS: { pattern: RegExp; reason: string }[] = [
-  { pattern: /ed25519:[1-9A-HJ-NP-Za-km-z]{32,}/, reason: 'NEAR ed25519 key material' },
-  { pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/, reason: 'PEM private key header' },
+  {
+    pattern: /ed25519:[1-9A-HJ-NP-Za-km-z]{32,}/,
+    reason: 'NEAR ed25519 key material',
+  },
+  {
+    pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+    reason: 'PEM private key header',
+  },
   { pattern: /\bPRIVATE_KEY\s*=/, reason: 'PRIVATE_KEY assignment' },
   { pattern: /\bSECRET_KEY\s*=/, reason: 'SECRET_KEY assignment' },
   { pattern: /\bsk-[a-zA-Z0-9]{20,}/, reason: 'API secret key token (sk-...)' },
-  { pattern: /\bwk_[a-zA-Z0-9]{16,}/, reason: 'OutLayer wallet credential (wk_...)' },
+  {
+    pattern: /\bwk_[a-zA-Z0-9]{16,}/,
+    reason: 'OutLayer wallet credential (wk_...)',
+  },
 ];
 
 const FORBIDDEN_FILENAMES = new Set([
@@ -64,7 +73,9 @@ export class BundleService {
   private readonly storageDir: string;
 
   constructor() {
-    this.storageDir = resolve(process.env.BUNDLE_STORAGE_DIR || './data/bundles');
+    this.storageDir = resolve(
+      process.env.BUNDLE_STORAGE_DIR || './data/bundles',
+    );
     mkdirSync(this.storageDir, { recursive: true });
   }
 
@@ -72,8 +83,14 @@ export class BundleService {
    * Validates that a hash string is exactly 64 lowercase hexadecimal characters.
    */
   validateSha256Hex(hash: string): void {
-    if (typeof hash !== 'string' || hash.length !== SHA256_HEX_LENGTH || !/^[0-9a-f]{64}$/.test(hash)) {
-      throw new BadRequestException('bundle_sha256 must be 64 lowercase hex characters');
+    if (
+      typeof hash !== 'string' ||
+      hash.length !== SHA256_HEX_LENGTH ||
+      !/^[0-9a-f]{64}$/.test(hash)
+    ) {
+      throw new BadRequestException(
+        'bundle_sha256 must be 64 lowercase hex characters',
+      );
     }
   }
 
@@ -100,12 +117,16 @@ export class BundleService {
     const textView = bytes.toString('utf8');
 
     if (textView.includes('../') || textView.includes('..\\')) {
-      throw new BadRequestException('Bundle contains disallowed path traversal sequence (..)');
+      throw new BadRequestException(
+        'Bundle contains disallowed path traversal sequence (..)',
+      );
     }
 
     for (const { pattern, reason } of FORBIDDEN_SECRET_PATTERNS) {
       if (pattern.test(textView)) {
-        throw new BadRequestException(`Bundle rejected by secret scanner: detected ${reason}`);
+        throw new BadRequestException(
+          `Bundle rejected by secret scanner: detected ${reason}`,
+        );
       }
     }
   }
@@ -113,7 +134,10 @@ export class BundleService {
   /**
    * Validates and stores raw bundle bytes under their exact SHA-256 content hash.
    */
-  storeBundle(expectedSha256: string, bytes: Buffer): { bundle_sha256: string; byte_length: number } {
+  storeBundle(
+    expectedSha256: string,
+    bytes: Buffer,
+  ): { bundle_sha256: string; byte_length: number } {
     this.validateSha256Hex(expectedSha256);
     this.scanBundleForViolations(bytes);
 
@@ -166,7 +190,9 @@ export class BundleService {
   packSanitizedDirectory(sourceDir: string): PackedBundleResult {
     const absDir = resolve(sourceDir);
     if (!existsSync(absDir)) {
-      throw new BadRequestException(`Source directory does not exist: ${sourceDir}`);
+      throw new BadRequestException(
+        `Source directory does not exist: ${sourceDir}`,
+      );
     }
 
     const entries = readdirSync(absDir).sort();
@@ -174,7 +200,9 @@ export class BundleService {
 
     for (const entryName of entries) {
       if (FORBIDDEN_FILENAMES.has(entryName) || entryName.startsWith('.env')) {
-        throw new BadRequestException(`Forbidden file in bundle directory: ${entryName}`);
+        throw new BadRequestException(
+          `Forbidden file in bundle directory: ${entryName}`,
+        );
       }
       if (entryName.startsWith('.')) {
         continue;
@@ -184,7 +212,9 @@ export class BundleService {
       const stat = lstatSync(fullPath);
 
       if (stat.isSymbolicLink()) {
-        throw new BadRequestException(`Symlinks are forbidden in agent bundles: ${entryName}`);
+        throw new BadRequestException(
+          `Symlinks are forbidden in agent bundles: ${entryName}`,
+        );
       }
       if (!stat.isFile()) {
         continue;
@@ -192,7 +222,9 @@ export class BundleService {
 
       const normalizedPath = posix.normalize(entryName);
       if (normalizedPath.startsWith('..') || normalizedPath.startsWith('/')) {
-        throw new BadRequestException(`Invalid entry path in bundle: ${entryName}`);
+        throw new BadRequestException(
+          `Invalid entry path in bundle: ${entryName}`,
+        );
       }
 
       const contentBytes = readFileSync(fullPath);
@@ -205,7 +237,9 @@ export class BundleService {
     }
 
     if (packedEntries.length === 0) {
-      throw new BadRequestException('Bundle directory contains no packable files');
+      throw new BadRequestException(
+        'Bundle directory contains no packable files',
+      );
     }
     if (packedEntries.length > MAX_BUNDLE_FILES) {
       throw new BadRequestException(
@@ -245,7 +279,9 @@ export class BundleService {
     try {
       validateManifest(manifest);
     } catch (err) {
-      throw new BadRequestException(err instanceof Error ? err.message : String(err));
+      throw new BadRequestException(
+        err instanceof Error ? err.message : String(err),
+      );
     }
 
     return {
@@ -258,4 +294,3 @@ export class BundleService {
     return join(this.storageDir, `${sha256}.bundle`);
   }
 }
-

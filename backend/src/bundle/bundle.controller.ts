@@ -37,7 +37,9 @@ export class BundleController {
     } else if (typeof body?.content_utf8 === 'string') {
       bytes = Buffer.from(body.content_utf8, 'utf8');
     } else {
-      throw new BadRequestException('Provide content_base64 or content_utf8 in request body');
+      throw new BadRequestException(
+        'Provide content_base64 or content_utf8 in request body',
+      );
     }
 
     return this.bundleService.storeBundle(sha256, bytes);
@@ -51,4 +53,3 @@ export class BundleController {
     res.status(HttpStatus.OK).send(bytes);
   }
 }
-

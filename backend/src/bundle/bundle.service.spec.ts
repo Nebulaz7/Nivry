@@ -1,4 +1,8 @@
-import { BadRequestException, NotFoundException, PayloadTooLargeException } from '@nestjs/common';
+import {
+  BadRequestException,
+  NotFoundException,
+  PayloadTooLargeException,
+} from '@nestjs/common';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,7 +23,10 @@ describe('BundleService', () => {
   });
 
   it('stores and retrieves a valid content-hashed bundle', () => {
-    const payload = Buffer.from('{"format":"nivry-bundle-v1","entries":[{"path":"README.md","content":"# Agent"}]}', 'utf8');
+    const payload = Buffer.from(
+      '{"format":"nivry-bundle-v1","entries":[{"path":"README.md","content":"# Agent"}]}',
+      'utf8',
+    );
     const sha256 = service.computeSha256(payload);
 
     const stored = service.storeBundle(sha256, payload);
@@ -34,7 +41,9 @@ describe('BundleService', () => {
     const payload = Buffer.from('valid content', 'utf8');
     const wrongHash = 'a'.repeat(64);
 
-    expect(() => service.storeBundle(wrongHash, payload)).toThrow(BadRequestException);
+    expect(() => service.storeBundle(wrongHash, payload)).toThrow(
+      BadRequestException,
+    );
   });
 
   it('rejects bundles containing embedded NEAR private keys or OutLayer credentials', () => {
@@ -43,23 +52,34 @@ describe('BundleService', () => {
       'utf8',
     );
     const nearKeyHash = service.computeSha256(nearKeyPayload);
-    expect(() => service.storeBundle(nearKeyHash, nearKeyPayload)).toThrow(BadRequestException);
+    expect(() => service.storeBundle(nearKeyHash, nearKeyPayload)).toThrow(
+      BadRequestException,
+    );
 
-    const outlayerPayload = Buffer.from('api_key=wk_1234567890abcdef1234', 'utf8');
+    const outlayerPayload = Buffer.from(
+      'api_key=wk_1234567890abcdef1234',
+      'utf8',
+    );
     const outlayerHash = service.computeSha256(outlayerPayload);
-    expect(() => service.storeBundle(outlayerHash, outlayerPayload)).toThrow(BadRequestException);
+    expect(() => service.storeBundle(outlayerHash, outlayerPayload)).toThrow(
+      BadRequestException,
+    );
   });
 
   it('rejects bundles containing path traversal sequences', () => {
     const traversalPayload = Buffer.from('{"path":"../../etc/passwd"}', 'utf8');
     const hash = service.computeSha256(traversalPayload);
-    expect(() => service.storeBundle(hash, traversalPayload)).toThrow(BadRequestException);
+    expect(() => service.storeBundle(hash, traversalPayload)).toThrow(
+      BadRequestException,
+    );
   });
 
   it('rejects oversized bundles', () => {
     const oversized = Buffer.alloc(MAX_BUNDLE_BYTES + 1, 'a');
     const hash = service.computeSha256(oversized);
-    expect(() => service.storeBundle(hash, oversized)).toThrow(PayloadTooLargeException);
+    expect(() => service.storeBundle(hash, oversized)).toThrow(
+      PayloadTooLargeException,
+    );
   });
 
   it('throws NotFoundException when bundle does not exist', () => {
@@ -72,7 +92,8 @@ describe('BundleService', () => {
       name: 'Docs Reporter',
       description: 'Produces a repository documentation report.',
       runtime_hint: 'hermes',
-      bundle_sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      bundle_sha256:
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       task_kind: 'docs_report_v1',
       manifest_uri: 'https://example.invalid/bundles/docs-reporter.tar.gz',
     };
@@ -96,10 +117,11 @@ describe('BundleService', () => {
       expect(packed1.files).toEqual(['a.txt', 'b.txt']);
 
       writeFileSync(join(fixtureDir, '.env'), 'SECRET=123');
-      expect(() => service.packSanitizedDirectory(fixtureDir)).toThrow(BadRequestException);
+      expect(() => service.packSanitizedDirectory(fixtureDir)).toThrow(
+        BadRequestException,
+      );
     } finally {
       rmSync(fixtureDir, { recursive: true, force: true });
     }
   });
 });
-

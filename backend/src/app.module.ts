@@ -8,10 +8,14 @@ import { PassportModule } from './passport/passport.module';
 import { TasksModule } from './tasks/tasks.module';
 
 @Module({
-  imports: [BundleModule, VerifierModule, DatabaseModule, PassportModule, TasksModule],
+  imports: [
+    BundleModule,
+    VerifierModule,
+    DatabaseModule,
+    PassportModule,
+    TasksModule,
+  ],
   controllers: [AppController],
   providers: [AppService],
 })
 export class AppModule {}
-
-

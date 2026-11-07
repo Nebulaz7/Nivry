@@ -36,75 +36,96 @@ describe('ChainReaderService', () => {
         task_kind: 'docs_report_v1',
         manifest_uri: 'https://example.invalid/bundles/docs-reporter.tar.gz',
       },
-      manifest_hash: '047e40193f92744a8b439ce91b8fb58bbb4a0de8f76d6e33513b864430235763',
+      manifest_hash:
+        '047e40193f92744a8b439ce91b8fb58bbb4a0de8f76d6e33513b864430235763',
     };
 
-    const encodedBytes = Array.from(Buffer.from(JSON.stringify(mockAgentInfo), 'utf8'));
+    const encodedBytes = Array.from(
+      Buffer.from(JSON.stringify(mockAgentInfo), 'utf8'),
+    );
     let capturedBody: Record<string, unknown> | null = null;
 
-    global.fetch = jest.fn().mockImplementation(async (_url, init) => {
-      capturedBody = JSON.parse(init.body as string);
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          jsonrpc: '2.0',
-          id: 'nivry-chain-reader',
-          result: {
-            result: encodedBytes,
-            block_height: 100,
-            block_hash: 'blockhash1',
-          },
-        }),
-      };
-    });
+    global.fetch = jest
+      .fn()
+      .mockImplementation((_url: unknown, init?: RequestInit) => {
+        const bodyStr = typeof init?.body === 'string' ? init.body : '{}';
+        capturedBody = JSON.parse(bodyStr) as Record<string, unknown>;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              jsonrpc: '2.0',
+              id: 'nivry-chain-reader',
+              result: {
+                result: encodedBytes,
+                block_height: 100,
+                block_hash: 'blockhash1',
+              },
+            }),
+        });
+      });
 
     const info = await service.getAgentInfo('1');
     expect(info.token_id).toBe('1');
     expect(info.owner_id).toBe('alice.testnet');
     expect(capturedBody).not.toBeNull();
-    const params = (capturedBody as unknown as { params: Record<string, unknown> }).params;
+    const params = (
+      capturedBody as unknown as { params: Record<string, unknown> }
+    ).params;
     expect(params.finality).toBe('final');
     expect(params.account_id).toBe('registry.nivry.testnet');
     expect(params.method_name).toBe('agent_info');
-    expect(Buffer.from(params.args_base64 as string, 'base64').toString('utf8')).toBe(
-      '{"token_id":"1"}',
-    );
+    expect(
+      Buffer.from(params.args_base64 as string, 'base64').toString('utf8'),
+    ).toBe('{"token_id":"1"}');
   });
 
   it('verifies keyless locked account state vs development/unverified state', async () => {
     let mockKeys: unknown[] = [];
 
-    global.fetch = jest.fn().mockImplementation(async (_url, init) => {
-      const body = JSON.parse(init.body as string);
-      if (body.params.request_type === 'view_account') {
-        return {
+    global.fetch = jest
+      .fn()
+      .mockImplementation((_url: unknown, init?: RequestInit) => {
+        const body = JSON.parse(
+          typeof init?.body === 'string' ? init.body : '{}',
+        ) as { params?: { request_type?: string } };
+        if (body.params?.request_type === 'view_account') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                result: {
+                  amount: '50000000000000000000000',
+                  storage_usage: 280000,
+                  code_hash: '99999999999999999999999999999999',
+                },
+              }),
+          });
+        }
+        return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({
-            result: {
-              amount: '50000000000000000000000',
-              storage_usage: 280000,
-              code_hash: '99999999999999999999999999999999',
-            },
-          }),
-        };
-      }
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          result: { keys: mockKeys },
-        }),
-      };
-    });
+          json: () =>
+            Promise.resolve({
+              result: { keys: mockKeys },
+            }),
+        });
+      });
 
-    const locked = await service.verifyAccountLockState('00000001.registry.nivry.testnet');
+    const locked = await service.verifyAccountLockState(
+      '00000001.registry.nivry.testnet',
+    );
     expect(locked.is_keyless).toBe(true);
     expect(locked.verification_label).toBe('locked_release');
 
-    mockKeys = [{ public_key: 'ed25519:abc', access_key: { permission: 'FullAccess' } }];
-    const unlocked = await service.verifyAccountLockState('registry.nivry.testnet');
+    mockKeys = [
+      { public_key: 'ed25519:abc', access_key: { permission: 'FullAccess' } },
+    ];
+    const unlocked = await service.verifyAccountLockState(
+      'registry.nivry.testnet',
+    );
     expect(unlocked.is_keyless).toBe(false);
     expect(unlocked.verification_label).toBe('development/unverified');
   });
@@ -135,15 +156,17 @@ describe('ChainReaderService', () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({
-        error: {
-          message: 'wasm execution failed',
-          data: 'Smart contract panicked: unknown token',
-        },
-      }),
+      json: () =>
+        Promise.resolve({
+          error: {
+            message: 'wasm execution failed',
+            data: 'Smart contract panicked: unknown token',
+          },
+        }),
     });
 
-    await expect(service.getAgentInfo('999')).rejects.toThrow(NotFoundException);
+    await expect(service.getAgentInfo('999')).rejects.toThrow(
+      NotFoundException,
+    );
   });
 });
-

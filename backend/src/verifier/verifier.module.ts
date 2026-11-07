@@ -6,4 +6,3 @@ import { ChainReaderService } from './chain-reader.service';
   exports: [ChainReaderService],
 })
 export class VerifierModule {}
-

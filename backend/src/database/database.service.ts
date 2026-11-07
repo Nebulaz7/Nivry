@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import type { AgentInfoView, Lifecycle, ManifestView } from '../chain/chain-reader.service';
+import type { AgentInfoView, Lifecycle, ManifestView } from '../verifier/chain-reader.service';
 
 export interface StoredAgentRow {
   token_id: string;

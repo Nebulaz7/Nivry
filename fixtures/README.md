@@ -36,3 +36,4 @@ silent divergence between languages.
 The bundle hash inside the manifest commits to the archive bytes. That is an
 integrity commitment only: it does not prove authorship, availability, secrecy,
 or that the runtime actually executes what was published.
+

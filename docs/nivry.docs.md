@@ -57,13 +57,13 @@ The Bundle Module functions as an automated security filter and verified store:
 
 ---
 
-## 2. Chain Module
+## 2. Verifier Module (formerly Chain)
 
-### What the Chain Module Does
+### What the Verifier Module Does
 
 In Nivry, each AI agent is an on-chain NFT title deed on the NEAR blockchain. Each agent also controls a dedicated treasury account that holds funds. 
 
-Our backend runs outside the blockchain. It cannot guess on-chain state, and it cannot trust unverified user claims. The `ChainReaderService`, located in `backend/src/chain/chain-reader.service.ts`, acts as the read-only verification inspector. It queries NEAR RPC nodes using finalized blocks (`finality: 'final'`) to confirm on-chain ownership, verify account locks, and inspect transaction outcomes.
+Our backend runs outside the blockchain. It cannot guess on-chain state, and it cannot trust unverified user claims. The `ChainReaderService`, located in `backend/src/verifier/chain-reader.service.ts`, acts as the read-only verification inspector. It queries NEAR RPC nodes using finalized blocks (`finality: 'final'`) to confirm on-chain ownership, verify account locks, and inspect transaction outcomes.
 
 ```
                   ┌───────────────────────┐
@@ -71,7 +71,7 @@ Our backend runs outside the blockchain. It cannot guess on-chain state, and it 
                   └───────────┬───────────┘
                               ▼
                   ┌───────────────────────┐
-                  │      Chain Module     │
+                  │    Verifier Module    │
                   │ (ChainReaderService)  │
                   └───────────┬───────────┘
                               │
@@ -102,7 +102,7 @@ Our backend runs outside the blockchain. It cannot guess on-chain state, and it 
    - The treasury account keeps its funds intact, but now accepts orders only from Alice.
 
 5. **NEP-297 Standard Event Ingestion (`getFinalTransactionOutcome`):**
-   When contracts execute payments, they emit standard log lines (`EVENT_JSON:...`). The chain module extracts these logs and preserves their exact `(receipt_id, log_index)` order.
+   When contracts execute payments, they emit standard log lines (`EVENT_JSON:...`). The verifier module extracts these logs and preserves their exact `(receipt_id, log_index)` order.
 
 ---
 
@@ -145,3 +145,109 @@ The Database Module (`DatabaseService` in `backend/src/database/database.service
 
 5. **Synchronization Cursors (`cursors`):**
    The database records the block height of the latest processed event. When the backend restarts, it reads the cursor and resumes processing without missing events or re-indexing history.
+
+---
+
+## 4. Passport Module (formerly Projection)
+
+### What the Passport Module Does
+
+On a blockchain, events occur as individual, low-level log lines: *"payment received"*, *"agent transferred"*, *"funds dispatched"*. 
+
+These raw logs are like scattered receipts in a shoebox. A buyer or auditor cannot understand an agent's true history by reading raw blockchain receipts one by one. The Passport Module (`EventProjectionService` in `backend/src/passport/event-projection.service.ts`) gathers raw on-chain events and live contract state to produce the **Agent Passport**.
+
+```
+    [ Raw NEP-297 Blockchain Events ]  +  [ Live Chain Views ]
+                    │                              │
+                    └──────────────┬───────────────┘
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │    EventProjectionService    │
+                    │       (Passport Engine)      │
+                    └──────────────┬───────────────┘
+                                   │
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │        Agent Passport        │
+                    │  - Identity & Owner          │
+                    │  - Zero-Key Lock Proof       │
+                    │  - History by Authority Epoch│
+                    │  - Audited Financial Totals  │
+                    └──────────────────────────────┘
+```
+
+### Key Responsibilities and How It Works
+
+1. **Building the Agent Passport (`getAgentPassport`):**
+   The Agent Passport functions like a comprehensive vehicle history report for an AI agent. It assembles current identity, proof of zero-key lock, and live spendable balances.
+
+2. **History Grouped by Ownership Era (`history_by_epoch`):**
+   Every time an agent transfers to a new owner, the blockchain increments the `authority_epoch`. The passport groups all past transactions and operations by epoch, cleanly isolating prior owners from current owners.
+
+3. **Distinct Separation of Funds:**
+   The service strictly categorizes incoming funds between `service_payment` (revenue earned by completing client tasks) and `owner_deposit` (operating budget provided by the owner).
+
+4. **Safe On-Demand Ingestion (`ingestTransactionFromChain`):**
+   When an on-chain transaction completes, clients call `POST /agents/:tokenId/ingest-tx` to immediately ingest event logs idempotently and update the passport.
+
+### API Endpoints (`PassportController`)
+
+- `GET /agents`: Returns a paginated list of all indexed agents.
+- `GET /agents/:tokenId/passport`: Returns the complete Agent Passport with live verification and epoch history.
+- `POST /agents/:tokenId/ingest-tx`: Ingests a finalized transaction hash to update local projections immediately.
+
+---
+
+## 5. Tasks Module
+
+### What the Tasks Module Does
+
+An AI agent's instructions (the **Bundle**) define what jobs it can do and what skills it has. 
+
+When a client hires the agent to execute a task, the Tasks Module (`TaskRunnerService` in `backend/src/tasks/task-runner.service.ts`) serves as the **secure execution sandbox**. It enforces strict path restrictions, memory and file size limits, timeouts, and single-task concurrency so executing client tasks cannot compromise the server.
+
+```
+                  ┌────────────────────────┐
+                  │   Client Task Request  │
+                  └───────────┬────────────┘
+                              ▼
+                  ┌────────────────────────┐
+                  │    TaskRunnerService   │
+                  └───────────┬────────────┘
+                              │
+             Enforces 4 strict safety gates
+                              │
+       ┌──────────────────────┼──────────────────────┐
+       ▼                      ▼                      ▼
+1. Path Sandbox         2. Resource Limits     3. Single Concurrency
+- Only fixtures/ dir    - Max 50 files         - 1 task per agent
+- Rejects ".." / URLs   - Max 256 KB per file  - Rejects overlapping jobs
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │  Deterministic Output  │
+                  │  Markdown + SHA-256    │
+                  └────────────────────────┘
+```
+
+### Core Architecture and Safety Controls
+
+1. **Path Traversal Protection (`resolveAllowlistedFixtureDir`):**
+   The service only allows agents to analyze directories inside the allowlisted `fixtures/` folder. It immediately rejects requests containing `../`, absolute paths (`/`), or URL schemes (`http://`).
+
+2. **Hard Resource Limits:**
+   - **File count limit:** The target directory cannot contain more than 50 files (`MAX_TASK_FILES`).
+   - **File size limit:** No single file can exceed 256 KB (`MAX_TASK_FILE_BYTES`).
+   - **Timeout guard:** Tasks abort automatically if execution exceeds 15 seconds (`DEFAULT_TASK_TIMEOUT_MS`).
+
+3. **Single-Task Concurrency:**
+   If an agent is already executing a job, the service rejects any new task for that same agent with a `409 Conflict`.
+
+4. **Cryptographic Output Fingerprinting:**
+   The service analyzes code files, detects exported functions, and compiles a structured Markdown documentation report. It calculates a SHA-256 digest (`output_sha256`) of the final report. This gives clients cryptographic proof of the exact output generated.
+
+### API Endpoints (`TasksController`)
+
+- `POST /tasks`: Submits and runs a task for a specified agent token.
+- `GET /tasks/:taskId`: Returns the current status (`pending`, `running`, `completed`, `failed`, or `cancelled`) and result output.
+- `POST /tasks/:taskId/cancel`: Cancels an active task.

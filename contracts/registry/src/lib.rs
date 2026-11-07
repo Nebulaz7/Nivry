@@ -20,13 +20,14 @@ mod state;
 
 pub use manifest::Manifest;
 pub use state::{
-    AgentInfo, AgentRecord, ExecutorGrant, GrantView, Lifecycle, OperationKind, PendingOperation,
-    PendingOperationView,
+    AgentInfo, AgentRecord, ExecutorGrant, GrantView, Lifecycle, Listing, ListingView,
+    OperationKind, PendingOperation, PendingOperationView, PendingTransferCall,
+    PendingTransferCallView, SaleWithdrawal, SellerCredit, SellerCreditView,
 };
 
 use near_contract_standards::non_fungible_token::core::NonFungibleTokenCore;
 use near_contract_standards::non_fungible_token::enumeration::NonFungibleTokenEnumeration;
-use near_contract_standards::non_fungible_token::events::NftMint;
+use near_contract_standards::non_fungible_token::events::{NftMint, NftTransfer};
 use near_contract_standards::non_fungible_token::metadata::{NFTContractMetadata, TokenMetadata};
 use near_contract_standards::non_fungible_token::{NonFungibleToken, Token, TokenId};
 use near_sdk::borsh::BorshSerialize;
@@ -58,9 +59,18 @@ pub const DISPATCH_GAS: Gas = Gas::from_tgas(40);
 pub const SETTLE_GAS: Gas = Gas::from_tgas(25);
 /// Gas for the fixed `operation_status` query used to prove an unreadable outcome.
 pub const STATUS_GAS: Gas = Gas::from_tgas(20);
+/// Gas handed to the `nft_on_transfer` receiver. The resolver is funded separately.
+pub const RECEIVER_GAS: Gas = Gas::from_tgas(25);
+/// Gas for the fixed `treasury_info` query used by provisioning recovery.
+pub const PROVISIONING_STATUS_GAS: Gas = Gas::from_tgas(20);
 
 pub const MAX_RECIPIENTS: usize = 8;
 pub const MAX_CALLBACK_RESULT_BYTES: usize = 256;
+
+/// Charged at listing to cover both the listing record and the seller-credit record
+/// created at purchase. Prepaid by the seller so a sale never silently consumes the
+/// buyer's price for storage (PLAN.md §10).
+pub const LISTING_STORAGE_DEPOSIT_YOCTO: u128 = 20_000_000_000_000_000_000_000;
 
 /// A grant may never outlive this horizon, regardless of what a client asks for.
 pub const MAX_GRANT_LIFETIME_NS: u64 = 90 * 24 * 60 * 60 * 1_000_000_000;
@@ -82,6 +92,7 @@ enum StorageKey {
     Agents,
     TokenByTreasury,
     ExecutorToken,
+    SellerCredits,
 }
 
 /// Argument type for `set_executor`.
@@ -110,6 +121,14 @@ struct WalletDispatchOutcome {
 struct WalletOperationView {
     operation_id: String,
     status: String,
+}
+
+/// The binding fields of the treasury's `treasury_info` view, used only to prove
+/// that a provisioned child really belongs to this registry and token.
+#[near(serializers = [json])]
+struct WalletTreasuryInfo {
+    registry: AccountId,
+    token_id: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -147,6 +166,10 @@ pub struct Registry {
     token_by_treasury: LookupMap<AccountId, TokenId>,
     /// Prevents one executor being actively shared between agents (PLAN.md §4).
     executor_token: LookupMap<AccountId, TokenId>,
+    /// Pull-payment liabilities owed to sellers. Never backed by treasury funds.
+    seller_credits: LookupMap<AccountId, SellerCredit>,
+    /// Sum of available + reserved seller credits, for a solvency view.
+    total_seller_credits_yocto: u128,
     /// Monotonic reservation counter. Never recycled.
     next_token_id: u64,
     wallet_code_hash: Vec<u8>,
@@ -178,6 +201,8 @@ impl Default for Registry {
             agents: LookupMap::new(StorageKey::Agents),
             token_by_treasury: LookupMap::new(StorageKey::TokenByTreasury),
             executor_token: LookupMap::new(StorageKey::ExecutorToken),
+            seller_credits: LookupMap::new(StorageKey::SellerCredits),
+            total_seller_credits_yocto: 0,
             next_token_id: 1,
             wallet_code_hash: Vec::new(),
         }
@@ -247,6 +272,9 @@ impl Registry {
                 executor_grant: None,
                 next_command_nonce: 1,
                 pending_operation: None,
+                pending_transfer_call: None,
+                next_listing_id: 1,
+                listing: None,
                 manifest,
                 manifest_hash: manifest_hash.clone(),
                 funder: funder.clone(),
@@ -372,6 +400,7 @@ impl Registry {
         let owner = self.require_owner(&token_id);
         let mut agent = self.load_agent(&token_id);
         self.require_ready_idle(&agent);
+        self.require_not_listed(&agent);
         require!(!agent.frozen, "agent is frozen");
         require!(
             agent.authority_epoch == expected_epoch,
@@ -449,6 +478,7 @@ impl Registry {
         let _owner = self.require_owner(&token_id);
         let mut agent = self.load_agent(&token_id);
         self.require_ready_idle(&agent);
+        self.require_not_listed(&agent);
         require!(
             agent.authority_epoch == expected_epoch,
             "expected_epoch is stale"
@@ -490,6 +520,11 @@ impl Registry {
             "expected_epoch is stale"
         );
 
+        // Freezing a listed token cancels the listing first, atomically, before the
+        // epoch advances (PLAN.md §8), so the seller cannot leave a live listing on
+        // an agent they just stopped.
+        agent.listing = None;
+
         if let Some(grant) = agent.executor_grant.take() {
             self.executor_token.remove(&grant.executor_id);
         }
@@ -526,11 +561,8 @@ impl Registry {
         let mut agent = self.load_agent(&token_id);
         let owner = self.current_owner(&token_id);
 
-        require!(agent.lifecycle == Lifecycle::Ready, "agent is not ready");
-        require!(
-            agent.pending_operation.is_none(),
-            "agent has an unresolved treasury command"
-        );
+        self.require_ready_idle(&agent);
+        self.require_not_listed(&agent);
         require!(!agent.frozen, "agent is frozen");
         require!(
             owner == expected_owner,
@@ -616,6 +648,7 @@ impl Registry {
         let _owner = self.require_owner(&token_id);
         let agent = self.load_agent(&token_id);
         self.require_ready_idle(&agent);
+        self.require_not_listed(&agent);
         require!(!agent.frozen, "agent is frozen");
         require!(
             agent.authority_epoch == expected_epoch,
@@ -776,6 +809,375 @@ impl Registry {
             .detach();
     }
 
+    // ---- inline market -------------------------------------------------
+
+    /// Fixed-price listing. Freezes outgoing treasury commands, owner withdrawals
+    /// and authority changes until cancellation or purchase (PLAN.md §10).
+    ///
+    /// The seller prepays storage so a later purchase never consumes the buyer's
+    /// price for listing/credit bookkeeping.
+    #[payable]
+    pub fn list_agent(&mut self, token_id: String, expected_epoch: u64, price: U128) -> u64 {
+        require!(
+            env::attached_deposit().as_yoctonear() == LISTING_STORAGE_DEPOSIT_YOCTO,
+            "attach exactly the published listing storage deposit"
+        );
+
+        let seller = self.require_owner(&token_id);
+        let mut agent = self.load_agent(&token_id);
+        self.require_ready_idle(&agent);
+        require!(agent.listing.is_none(), "agent is already listed");
+        require!(!agent.frozen, "agent is frozen");
+        require!(
+            agent.authority_epoch == expected_epoch,
+            "expected_epoch is stale"
+        );
+        require!(price.0 > 0, "price must be positive");
+
+        let listing_id = agent.next_listing_id;
+        agent.next_listing_id = listing_id.checked_add(1).expect("listing id overflow");
+        let epoch = agent.authority_epoch;
+        agent.listing = Some(Listing {
+            listing_id,
+            seller: seller.clone(),
+            epoch,
+            price_yocto: price.0,
+            manifest_hash: agent.manifest_hash.clone(),
+        });
+        self.agents.insert(token_id.clone(), agent);
+
+        emit(
+            "agent_listed",
+            json!({
+                "token_id": token_id,
+                "listing_id": listing_id,
+                "seller": seller,
+                "price_yocto": price,
+                "authority_epoch": epoch,
+            }),
+        );
+        listing_id
+    }
+
+    /// Remove a listing. Does not restore a grant cleared by a freeze.
+    pub fn cancel_listing(&mut self, token_id: String, listing_id: u64) {
+        let _seller = self.require_owner(&token_id);
+        let mut agent = self.load_agent(&token_id);
+        let listing = agent.listing.clone().expect("agent is not listed");
+        require!(
+            listing.listing_id == listing_id,
+            "listing_id does not match the live listing"
+        );
+
+        agent.listing = None;
+        self.agents.insert(token_id.clone(), agent);
+
+        emit(
+            "agent_listing_cancelled",
+            json!({ "token_id": token_id, "listing_id": listing_id }),
+        );
+    }
+
+    /// Buy a listed agent at its exact price.
+    ///
+    /// Everything that must move together happens in this one receipt: the title,
+    /// the authority generation, the dropped grant, the consumed listing and the
+    /// seller's credit. No external payout or provider call is required, so there is
+    /// no window where the buyer owns the token but the seller is unpaid.
+    #[payable]
+    pub fn buy_agent(
+        &mut self,
+        token_id: String,
+        listing_id: u64,
+        expected_epoch: u64,
+        expected_manifest_hash: String,
+    ) -> AccountId {
+        let mut agent = self.load_agent(&token_id);
+        self.require_ready_idle(&agent);
+
+        let listing = agent.listing.clone().expect("agent is not listed");
+        require!(
+            listing.listing_id == listing_id,
+            "listing_id does not match the live listing"
+        );
+        require!(
+            agent.authority_epoch == expected_epoch,
+            "expected_epoch is stale"
+        );
+        require!(
+            listing.epoch == expected_epoch,
+            "listing epoch does not match expected_epoch"
+        );
+        require!(
+            listing.manifest_hash == expected_manifest_hash,
+            "expected_manifest_hash does not match the listed manifest"
+        );
+        require!(
+            env::attached_deposit().as_yoctonear() == listing.price_yocto,
+            "attach exactly the listing price"
+        );
+
+        let buyer = env::predecessor_account_id();
+        require!(
+            buyer != listing.seller,
+            "seller cannot buy their own listing"
+        );
+
+        // Sender is the listed seller, which is the current owner; the standard
+        // implementation enforces that and rejects a same-owner transfer.
+        self.tokens
+            .internal_transfer(&listing.seller, &buyer, &token_id, None, None);
+
+        if let Some(grant) = agent.executor_grant.take() {
+            self.executor_token.remove(&grant.executor_id);
+        }
+        agent.authority_epoch = agent
+            .authority_epoch
+            .checked_add(1)
+            .expect("authority epoch overflow");
+        agent.ownership_change_count = agent
+            .ownership_change_count
+            .checked_add(1)
+            .expect("ownership change count overflow");
+        agent.frozen = false;
+        agent.listing = None;
+        let epoch = agent.authority_epoch;
+        self.agents.insert(token_id.clone(), agent);
+
+        self.credit_seller(&listing.seller, listing.price_yocto);
+
+        emit(
+            "agent_sold",
+            json!({
+                "token_id": token_id,
+                "listing_id": listing_id,
+                "seller": listing.seller,
+                "buyer": buyer,
+                "price_yocto": U128(listing.price_yocto),
+                "authority_epoch": epoch,
+            }),
+        );
+        buyer
+    }
+
+    // ---- seller proceeds and provisioning recovery ----------------------
+
+    /// Claim sale proceeds held by the registry.
+    ///
+    /// The credit is reserved **before** the transfer is scheduled, so a failed or
+    /// lost callback can never create a second withdrawable credit.
+    pub fn withdraw_sale_proceeds(&mut self, amount: U128) -> Promise {
+        let seller = env::predecessor_account_id();
+        let mut credit = self.seller_credit_of(&seller);
+        require!(
+            credit.pending_withdrawal.is_none(),
+            "a sale withdrawal is already unresolved"
+        );
+
+        let amount_yocto = amount.0;
+        require!(amount_yocto > 0, "amount must be positive");
+        require!(
+            amount_yocto <= credit.available_yocto,
+            "amount exceeds available sale proceeds"
+        );
+
+        let nonce = credit.next_nonce;
+        credit.next_nonce = nonce.checked_add(1).expect("nonce overflow");
+        credit.available_yocto -= amount_yocto;
+        credit.reserved_yocto = credit
+            .reserved_yocto
+            .checked_add(amount_yocto)
+            .expect("reserved credit overflow");
+        let operation_id = format!("sale:{seller}:{nonce}");
+        credit.pending_withdrawal = Some(SaleWithdrawal {
+            operation_id: operation_id.clone(),
+            nonce,
+            amount_yocto,
+        });
+        self.seller_credits.insert(seller.clone(), credit);
+
+        emit(
+            "sale_withdrawal_scheduled",
+            json!({
+                "account_id": seller,
+                "operation_id": operation_id,
+                "amount_yocto": U128(amount_yocto),
+            }),
+        );
+
+        Promise::new(seller.clone())
+            .transfer(NearToken::from_yoctonear(amount_yocto))
+            .then(Promise::new(env::current_account_id()).function_call(
+                "on_sale_withdrawal_settled".to_owned(),
+                serialize(&json!({ "account_id": seller, "operation_id": operation_id })),
+                ZERO_YOCTO,
+                SETTLE_GAS,
+            ))
+    }
+
+    /// Private settlement of a sale-proceeds withdrawal.
+    ///
+    /// Unlike a treasury payout this chain is a single `transfer`, so a failed
+    /// promise result unambiguously means the money did not move.
+    #[private]
+    pub fn on_sale_withdrawal_settled(&mut self, account_id: AccountId, operation_id: String) {
+        let mut credit = match self.seller_credits.get(&account_id) {
+            Some(credit) => credit.clone(),
+            None => {
+                emit(
+                    "sale_withdrawal_uncertain",
+                    json!({ "account_id": account_id, "operation_id": operation_id, "reason": "unknown_account" }),
+                );
+                return;
+            }
+        };
+
+        let pending = match credit.pending_withdrawal.clone() {
+            Some(pending) if pending.operation_id == operation_id => pending,
+            _ => {
+                emit(
+                    "sale_withdrawal_uncertain",
+                    json!({ "account_id": account_id, "operation_id": operation_id, "reason": "operation_mismatch" }),
+                );
+                return;
+            }
+        };
+
+        if env::promise_results_count() != 1 {
+            emit(
+                "sale_withdrawal_uncertain",
+                json!({ "account_id": account_id, "operation_id": operation_id, "reason": "missing_promise_result" }),
+            );
+            return;
+        }
+
+        let succeeded = env::promise_result_checked(0, MAX_CALLBACK_RESULT_BYTES).is_ok();
+        credit.reserved_yocto = credit.reserved_yocto.saturating_sub(pending.amount_yocto);
+        if succeeded {
+            self.total_seller_credits_yocto = self
+                .total_seller_credits_yocto
+                .saturating_sub(pending.amount_yocto);
+        } else {
+            credit.available_yocto = credit
+                .available_yocto
+                .checked_add(pending.amount_yocto)
+                .expect("available credit overflow");
+        }
+        credit.pending_withdrawal = None;
+        self.seller_credits.insert(account_id.clone(), credit);
+
+        emit(
+            "sale_withdrawal_settled",
+            json!({
+                "account_id": account_id,
+                "operation_id": operation_id,
+                "status": if succeeded { "succeeded" } else { "failed" },
+                "amount_yocto": U128(pending.amount_yocto),
+            }),
+        );
+    }
+
+    /// Recover a provisioning batch whose registry callback was lost.
+    ///
+    /// SAFE DIRECTION ONLY. It can complete a token the treasury proves it owns the
+    /// binding for; it never refunds. Proving that a child account does *not* exist
+    /// is not something one callback can do safely, so a failed batch stays
+    /// `Uncertain` for manual review rather than risking a refund plus a live
+    /// funded treasury (PLAN.md §7).
+    pub fn reconcile_provisioning(&mut self, token_id: String) -> Promise {
+        let agent = self.load_agent(&token_id);
+        require!(
+            agent.lifecycle == Lifecycle::Uncertain,
+            "agent is not in an uncertain provisioning state"
+        );
+        require!(
+            self.tokens.owner_by_id.get(&token_id).is_none(),
+            "token is already minted"
+        );
+
+        Promise::new(agent.treasury_account_id.clone())
+            .function_call(
+                "treasury_info".to_owned(),
+                b"{}".to_vec(),
+                ZERO_YOCTO,
+                PROVISIONING_STATUS_GAS,
+            )
+            .then(Promise::new(env::current_account_id()).function_call(
+                "on_provisioning_status".to_owned(),
+                serialize(&json!({ "token_id": token_id })),
+                ZERO_YOCTO,
+                SETTLE_GAS,
+            ))
+    }
+
+    /// Private resolution of a provisioning reconciliation query.
+    ///
+    /// The token is only minted when the treasury proves it is bound to this
+    /// registry and this token id.
+    #[private]
+    pub fn on_provisioning_status(&mut self, token_id: String) {
+        let mut agent = match self.agents.get(&token_id) {
+            Some(agent) => agent.clone(),
+            None => {
+                emit(
+                    "agent_provisioning_unknown",
+                    json!({ "token_id": token_id }),
+                );
+                return;
+            }
+        };
+
+        require!(
+            agent.lifecycle == Lifecycle::Uncertain,
+            "agent is not in an uncertain provisioning state"
+        );
+        require!(
+            self.tokens.owner_by_id.get(&token_id).is_none(),
+            "token is already minted"
+        );
+
+        let proves_binding = if env::promise_results_count() != 1 {
+            false
+        } else {
+            env::promise_result_checked(0, MAX_CALLBACK_RESULT_BYTES)
+                .ok()
+                .and_then(|bytes| {
+                    near_sdk::serde_json::from_slice::<WalletTreasuryInfo>(&bytes).ok()
+                })
+                .map(|info| info.registry == env::current_account_id() && info.token_id == token_id)
+                .unwrap_or(false)
+        };
+
+        if !proves_binding {
+            emit(
+                "agent_provisioning_still_uncertain",
+                json!({ "token_id": token_id }),
+            );
+            return;
+        }
+
+        let metadata = Self::token_metadata(&agent);
+        self.tokens.internal_mint_with_refund(
+            token_id.clone(),
+            agent.funder.clone(),
+            Some(metadata),
+            None,
+        );
+        NftMint {
+            owner_id: &agent.funder,
+            token_ids: &[token_id.as_str()],
+            memo: None,
+        }
+        .emit();
+        agent.lifecycle = Lifecycle::Ready;
+        self.agents.insert(token_id.clone(), agent);
+
+        emit(
+            "agent_ready",
+            json!({ "token_id": token_id, "via": "reconciliation" }),
+        );
+    }
+
     // ---- NEP-171 and views ---------------------------------------------
 
     pub fn nft_metadata(&self) -> NFTContractMetadata {
@@ -826,10 +1228,10 @@ impl Registry {
         );
 
         let mut agent = self.load_agent(&token_id);
-        require!(agent.lifecycle == Lifecycle::Ready, "agent is not ready");
+        self.require_ready_idle(&agent);
         require!(
-            agent.pending_operation.is_none(),
-            "agent has an unresolved treasury command"
+            agent.listing.is_none(),
+            "agent is listed for sale; cancel the listing first"
         );
 
         let sender = env::predecessor_account_id();
@@ -871,23 +1273,188 @@ impl Registry {
         );
     }
 
-    /// Not implemented in this Day-1 skeleton.
+    /// Standard NEP-171 transfer with receiver resolution.
     ///
-    /// Rejected loudly rather than faked. PLAN.md §9 requires provisional
-    /// ownership, a financial lock and a private resolver; a silent no-op would
-    /// misrepresent NEP-171 support. Until this exists, treat the release as a
-    /// restricted prototype rather than full NEP-171 core support.
+    /// The title moves provisionally and the agent is financially frozen until the
+    /// receiver answers. Authority rotates **now**, not on resolution, so a returned
+    /// token restores approvals but never an executor grant or an older generation
+    /// (PLAN.md §9).
+    ///
+    /// Callers must attach enough gas for the receiver call plus the resolver.
+    #[payable]
     pub fn nft_transfer_call(
         &mut self,
-        _receiver_id: AccountId,
-        _token_id: TokenId,
-        _approval_id: Option<u64>,
-        _memo: Option<String>,
-        _msg: String,
+        receiver_id: AccountId,
+        token_id: TokenId,
+        approval_id: Option<u64>,
+        memo: Option<String>,
+        msg: String,
     ) -> PromiseOrValue<bool> {
-        env::panic_str(
-            "nft_transfer_call is unsupported in this restricted prototype; use nft_transfer",
-        )
+        require!(
+            env::attached_deposit() == ONE_YOCTO,
+            "Requires attached deposit of exactly 1 yoctoNEAR"
+        );
+
+        let mut agent = self.load_agent(&token_id);
+        self.require_ready_idle(&agent);
+        require!(
+            agent.listing.is_none(),
+            "agent is listed for sale; cancel the listing first"
+        );
+
+        let sender = env::predecessor_account_id();
+        let (previous_owner, approvals) =
+            self.tokens
+                .internal_transfer(&sender, &receiver_id, &token_id, approval_id, memo);
+
+        agent.authority_epoch = agent
+            .authority_epoch
+            .checked_add(1)
+            .expect("authority epoch overflow");
+        if let Some(grant) = agent.executor_grant.take() {
+            self.executor_token.remove(&grant.executor_id);
+        }
+        agent.ownership_change_count = agent
+            .ownership_change_count
+            .checked_add(1)
+            .expect("ownership change count overflow");
+        agent.frozen = false;
+
+        let epoch = agent.authority_epoch;
+        let operation_id = format!("{token_id}:tc:{epoch}");
+        agent.pending_transfer_call = Some(PendingTransferCall {
+            operation_id: operation_id.clone(),
+            receiver_id: receiver_id.clone(),
+            previous_owner: previous_owner.clone(),
+            approvals: approvals
+                .map(|map| map.into_iter().collect())
+                .unwrap_or_default(),
+            epoch,
+        });
+        self.agents.insert(token_id.clone(), agent);
+
+        emit(
+            "transfer_call_started",
+            json!({
+                "token_id": token_id,
+                "operation_id": operation_id,
+                "receiver_id": receiver_id,
+                "previous_owner": previous_owner,
+                "authority_epoch": epoch,
+            }),
+        );
+
+        let promise = Promise::new(receiver_id.clone())
+            .function_call(
+                "nft_on_transfer".to_owned(),
+                serialize(&json!({
+                    "sender_id": sender,
+                    "previous_owner_id": previous_owner,
+                    "token_id": token_id,
+                    "msg": msg,
+                })),
+                ZERO_YOCTO,
+                RECEIVER_GAS,
+            )
+            .then(Promise::new(env::current_account_id()).function_call(
+                "on_transfer_call_resolved".to_owned(),
+                serialize(&json!({ "token_id": token_id, "operation_id": operation_id })),
+                ZERO_YOCTO,
+                SETTLE_GAS,
+            ));
+
+        PromiseOrValue::Promise(promise)
+    }
+
+    /// Private resolver for `nft_transfer_call`.
+    ///
+    /// Only an explicit `false` accepts the token. `true`, a malformed response or a
+    /// failed receiver call all return it, per NEP-171.
+    #[private]
+    pub fn on_transfer_call_resolved(&mut self, token_id: TokenId, operation_id: String) {
+        let mut agent = match self.agents.get(&token_id) {
+            Some(agent) => agent.clone(),
+            None => {
+                emit(
+                    "transfer_call_uncertain",
+                    json!({ "token_id": token_id, "operation_id": operation_id, "reason": "unknown_agent" }),
+                );
+                return;
+            }
+        };
+
+        let pending = match agent.pending_transfer_call.clone() {
+            Some(pending) if pending.operation_id == operation_id => pending,
+            _ => {
+                emit(
+                    "transfer_call_uncertain",
+                    json!({ "token_id": token_id, "operation_id": operation_id, "reason": "operation_mismatch" }),
+                );
+                return;
+            }
+        };
+
+        if env::promise_results_count() != 1 {
+            // No proof of the receiver's answer: stay locked and keep the token with
+            // the provisional recipient. Fail-closed, no admin unlock.
+            emit(
+                "transfer_call_uncertain",
+                json!({ "token_id": token_id, "operation_id": operation_id, "reason": "missing_promise_result" }),
+            );
+            return;
+        }
+
+        let accepted = matches!(
+            env::promise_result_checked(0, MAX_CALLBACK_RESULT_BYTES)
+                .ok()
+                .and_then(|bytes| near_sdk::serde_json::from_slice::<bool>(&bytes).ok()),
+            Some(false)
+        );
+
+        if accepted {
+            agent.pending_transfer_call = None;
+            self.agents.insert(token_id.clone(), agent);
+            emit(
+                "transfer_call_accepted",
+                json!({"token_id": token_id, "operation_id": operation_id}),
+            );
+            return;
+        }
+
+        // Return the token. Approvals are restored; grants and the authority
+        // generation are deliberately not rolled back.
+        self.tokens.internal_transfer_unguarded(
+            &token_id,
+            &pending.receiver_id,
+            &pending.previous_owner,
+        );
+        NftTransfer {
+            old_owner_id: &pending.receiver_id,
+            new_owner_id: &pending.previous_owner,
+            token_ids: &[token_id.as_str()],
+            authorized_id: None,
+            memo: None,
+        }
+        .emit();
+
+        if !pending.approvals.is_empty() {
+            let restored: std::collections::HashMap<AccountId, u64> =
+                pending.approvals.iter().cloned().collect();
+            if let Some(approvals_by_id) = self.tokens.approvals_by_id.as_mut() {
+                approvals_by_id.insert(&token_id, &restored);
+            }
+        }
+
+        agent.pending_transfer_call = None;
+        self.agents.insert(token_id.clone(), agent);
+        emit(
+            "transfer_call_returned",
+            json!({
+                "token_id": token_id,
+                "operation_id": operation_id,
+                "returned_to": pending.previous_owner,
+            }),
+        );
     }
 
     /// Full passport for one agent.
@@ -917,6 +1484,35 @@ impl Registry {
     /// Immutable treasury address for a reserved token id.
     pub fn treasury_account_id(&self, token_id: String) -> AccountId {
         self.load_agent(&token_id).treasury_account_id
+    }
+
+    /// Exact deposit `list_agent` requires, published rather than hidden.
+    pub fn listing_deposit(&self) -> U128 {
+        U128(LISTING_STORAGE_DEPOSIT_YOCTO)
+    }
+
+    /// Sale proceeds owed to an account, plus any unresolved withdrawal.
+    pub fn seller_credit(&self, account_id: AccountId) -> SellerCreditView {
+        let credit = self.seller_credit_of(&account_id);
+        SellerCreditView {
+            account_id,
+            available_yocto: U128(credit.available_yocto),
+            reserved_yocto: U128(credit.reserved_yocto),
+            pending_withdrawal_operation_id: credit
+                .pending_withdrawal
+                .map(|withdrawal| withdrawal.operation_id),
+        }
+    }
+
+    /// Total registry-held sale liability. Solvency requires this to stay below the
+    /// registry account balance, which is why seller credits never count treasury
+    /// funds (PLAN.md §10).
+    pub fn total_seller_credits(&self) -> U128 {
+        U128(self.total_seller_credits_yocto)
+    }
+
+    pub fn registry_balance(&self) -> U128 {
+        U128(env::account_balance().as_yoctonear())
     }
 
     /// The next token id that would be reserved. Monotonic; ids are never reused.
@@ -960,6 +1556,16 @@ impl Registry {
             agent.pending_operation.is_none(),
             "agent has an unresolved treasury command"
         );
+        require!(
+            agent.pending_transfer_call.is_none(),
+            "agent has an unresolved transfer call"
+        );
+    }
+
+    /// Listing freezes outgoing treasury commands, owner withdrawals and authority
+    /// changes until cancellation or purchase (PLAN.md §10).
+    pub(crate) fn require_not_listed(&self, agent: &AgentRecord) {
+        require!(agent.listing.is_none(), "agent is listed for sale");
     }
 
     pub(crate) fn derive_treasury_account_id(registry: &AccountId, numeric: u64) -> AccountId {
@@ -978,6 +1584,30 @@ impl Registry {
         WALLET_INITIAL_BALANCE
             .as_yoctonear()
             .saturating_add(REGISTRY_STORAGE_ALLOWANCE_YOCTO)
+    }
+
+    /// Seller credits are a registry liability, never treasury funds.
+    pub(crate) fn seller_credit_of(&self, account_id: &AccountId) -> SellerCredit {
+        self.seller_credits
+            .get(account_id)
+            .cloned()
+            .unwrap_or_else(SellerCredit::new)
+    }
+
+    pub(crate) fn credit_seller(&mut self, seller: &AccountId, amount_yocto: u128) {
+        if amount_yocto == 0 {
+            return;
+        }
+        let mut credit = self.seller_credit_of(seller);
+        credit.available_yocto = credit
+            .available_yocto
+            .checked_add(amount_yocto)
+            .expect("available credit overflow");
+        self.seller_credits.insert(seller.clone(), credit);
+        self.total_seller_credits_yocto = self
+            .total_seller_credits_yocto
+            .checked_add(amount_yocto)
+            .expect("total seller credit overflow");
     }
 
     /// Chains the fixed `operation_status` view call with the private resolver.
@@ -1202,7 +1832,7 @@ fn serialize(value: &Value) -> Vec<u8> {
 mod tests {
     use super::*;
     use near_sdk::test_utils::VMContextBuilder;
-    use near_sdk::{testing_env, NearToken};
+    use near_sdk::{testing_env, NearToken, PromiseResult};
 
     const REGISTRY: &str = "registry.test.near";
     const OWNER: &str = "owner.test.near";
@@ -1248,6 +1878,9 @@ mod tests {
             executor_grant: None,
             next_command_nonce: 1,
             pending_operation: None,
+            pending_transfer_call: None,
+            next_listing_id: 1,
+            listing: None,
             manifest_hash: manifest.sha256_hex(),
             manifest,
             funder: account(OWNER),
@@ -1562,5 +2195,307 @@ mod tests {
                 U64(4_000_000_000),
             )
             .detach();
+    }
+
+    // ---- day 3: inline market ------------------------------------------
+
+    fn env_with_promise(predecessor: &str, result: PromiseResult) {
+        testing_env!(
+            env_as(predecessor).build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            std::collections::HashMap::new(),
+            vec![result],
+        );
+    }
+
+    fn listed_registry(price: u128) -> Registry {
+        let mut registry = authorized();
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(LISTING_STORAGE_DEPOSIT_YOCTO))
+            .build());
+        let listing_id = registry.list_agent("1".to_owned(), 2, U128(price));
+        assert_eq!(listing_id, 1);
+        registry
+    }
+
+    fn manifest_hash(registry: &Registry) -> String {
+        registry.load_agent(&"1".to_owned()).manifest_hash
+    }
+
+    #[test]
+    #[should_panic(expected = "agent is listed for sale")]
+    fn listing_freezes_treasury_commands() {
+        let mut registry = listed_registry(5_000);
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, 2, 1, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "agent is listed for sale")]
+    fn listing_freezes_grant_changes() {
+        let mut registry = listed_registry(5_000);
+        testing_env!(env_as(OWNER).build());
+        registry.revoke_executor("1".to_owned(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "agent is listed for sale; cancel the listing first")]
+    fn a_listed_agent_cannot_be_directly_transferred() {
+        let mut registry = listed_registry(5_000);
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        registry.nft_transfer(account(BUYER), "1".to_owned(), None, None);
+    }
+
+    #[test]
+    fn buying_moves_title_credits_the_seller_and_clears_the_grant() {
+        let mut registry = listed_registry(5_000);
+        let hash = manifest_hash(&registry);
+
+        testing_env!(env_as(BUYER)
+            .attached_deposit(NearToken::from_yoctonear(5_000))
+            .build());
+        let buyer = registry.buy_agent("1".to_owned(), 1, 2, hash);
+        assert_eq!(buyer, account(BUYER));
+
+        assert_eq!(registry.current_owner(&"1".to_owned()), account(BUYER));
+        let agent = registry.load_agent(&"1".to_owned());
+        assert_eq!(agent.authority_epoch, 3);
+        assert_eq!(agent.ownership_change_count, 1);
+        assert!(agent.executor_grant.is_none());
+        assert!(agent.listing.is_none());
+        assert_eq!(agent.treasury_account_id, account(TREASURY));
+        assert!(!registry.executor_token.contains_key(&account(EXECUTOR)));
+
+        let credit = registry.seller_credit_of(&account(OWNER));
+        assert_eq!(credit.available_yocto, 5_000);
+        assert_eq!(registry.total_seller_credits_yocto, 5_000);
+        assert_eq!(
+            registry.seller_credit_of(&account(BUYER)).available_yocto,
+            0
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "attach exactly the listing price")]
+    fn buying_rejects_a_price_that_does_not_match() {
+        let mut registry = listed_registry(5_000);
+        let hash = manifest_hash(&registry);
+        testing_env!(env_as(BUYER)
+            .attached_deposit(NearToken::from_yoctonear(4_999))
+            .build());
+        registry.buy_agent("1".to_owned(), 1, 2, hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected_manifest_hash does not match the listed manifest")]
+    fn buying_rejects_a_manifest_mismatch() {
+        let mut registry = listed_registry(5_000);
+        testing_env!(env_as(BUYER)
+            .attached_deposit(NearToken::from_yoctonear(5_000))
+            .build());
+        registry.buy_agent("1".to_owned(), 1, 2, "b".repeat(64));
+    }
+
+    #[test]
+    fn cancelling_a_listing_restores_operability() {
+        let mut registry = listed_registry(5_000);
+        testing_env!(env_as(OWNER).build());
+        registry.cancel_listing("1".to_owned(), 1);
+        assert!(registry.load_agent(&"1".to_owned()).listing.is_none());
+
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, 2, 1, 100);
+        assert!(registry
+            .load_agent(&"1".to_owned())
+            .pending_operation
+            .is_some());
+    }
+
+    #[test]
+    fn freezing_cancels_an_active_listing() {
+        let mut registry = listed_registry(5_000);
+        testing_env!(env_as(OWNER).build());
+        registry.set_frozen("1".to_owned(), 2, true);
+        let agent = registry.load_agent(&"1".to_owned());
+        assert!(agent.frozen);
+        assert!(agent.listing.is_none());
+        assert_eq!(agent.authority_epoch, 3);
+    }
+
+    // ---- day 3: seller credits -----------------------------------------
+
+    fn credited_registry() -> Registry {
+        let mut registry = listed_registry(5_000);
+        let hash = manifest_hash(&registry);
+        testing_env!(env_as(BUYER)
+            .attached_deposit(NearToken::from_yoctonear(5_000))
+            .build());
+        registry.buy_agent("1".to_owned(), 1, 2, hash);
+        registry
+    }
+
+    #[test]
+    fn a_withdrawal_reserves_then_settles_on_success() {
+        let mut registry = credited_registry();
+        testing_env!(env_as(OWNER).build());
+        registry.withdraw_sale_proceeds(U128(2_000)).detach();
+
+        let credit = registry.seller_credit_of(&account(OWNER));
+        assert_eq!(credit.available_yocto, 3_000);
+        assert_eq!(credit.reserved_yocto, 2_000);
+        let operation_id = credit
+            .pending_withdrawal
+            .expect("withdrawal recorded")
+            .operation_id;
+
+        env_with_promise(REGISTRY, PromiseResult::Successful(Vec::new()));
+        registry.on_sale_withdrawal_settled(account(OWNER), operation_id);
+
+        let settled = registry.seller_credit_of(&account(OWNER));
+        assert_eq!(settled.available_yocto, 3_000);
+        assert_eq!(settled.reserved_yocto, 0);
+        assert!(settled.pending_withdrawal.is_none());
+        assert_eq!(registry.total_seller_credits_yocto, 3_000);
+    }
+
+    #[test]
+    fn a_failed_withdrawal_returns_the_credit() {
+        let mut registry = credited_registry();
+        testing_env!(env_as(OWNER).build());
+        registry.withdraw_sale_proceeds(U128(2_000)).detach();
+        let operation_id = registry
+            .seller_credit_of(&account(OWNER))
+            .pending_withdrawal
+            .unwrap()
+            .operation_id;
+
+        env_with_promise(REGISTRY, PromiseResult::Failed);
+        registry.on_sale_withdrawal_settled(account(OWNER), operation_id);
+
+        let credit = registry.seller_credit_of(&account(OWNER));
+        assert_eq!(credit.available_yocto, 5_000, "credit is restored");
+        assert_eq!(credit.reserved_yocto, 0);
+        assert_eq!(registry.total_seller_credits_yocto, 5_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount exceeds available sale proceeds")]
+    fn a_withdrawal_cannot_exceed_the_credit() {
+        let mut registry = credited_registry();
+        testing_env!(env_as(OWNER).build());
+        registry.withdraw_sale_proceeds(U128(5_001)).detach();
+    }
+
+    // ---- day 3: transfer-call resolution -------------------------------
+
+    #[test]
+    fn a_transfer_call_locks_the_agent_until_resolution() {
+        let mut registry = authorized();
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        let outcome = registry.nft_transfer_call(
+            account("receiver.test.near"),
+            "1".to_owned(),
+            None,
+            None,
+            "msg".to_owned(),
+        );
+        if let PromiseOrValue::Promise(promise) = outcome {
+            promise.detach();
+        }
+
+        let agent = registry.load_agent(&"1".to_owned());
+        assert!(agent.pending_transfer_call.is_some());
+        assert!(agent.executor_grant.is_none());
+        assert_eq!(agent.authority_epoch, 3);
+        assert_eq!(
+            registry.current_owner(&"1".to_owned()),
+            account("receiver.test.near")
+        );
+
+        testing_env!(env_as(EXECUTOR).build());
+        let blocked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registry.execute_payment(
+                "1".to_owned(),
+                account("receiver.test.near"),
+                3,
+                1,
+                account(RECIPIENT),
+                U128(10),
+                U64(4_000_000_000),
+            )
+        }));
+        assert!(blocked.is_err(), "the temporary recipient must not spend");
+    }
+
+    #[test]
+    fn a_resolver_return_keeps_the_new_generation_and_drops_the_grant() {
+        let mut registry = authorized();
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        let outcome = registry.nft_transfer_call(
+            account("receiver.test.near"),
+            "1".to_owned(),
+            None,
+            None,
+            "msg".to_owned(),
+        );
+        if let PromiseOrValue::Promise(promise) = outcome {
+            promise.detach();
+        }
+        let operation_id = registry
+            .load_agent(&"1".to_owned())
+            .pending_transfer_call
+            .unwrap()
+            .operation_id;
+
+        env_with_promise(REGISTRY, PromiseResult::Successful(b"true".to_vec()));
+        registry.on_transfer_call_resolved("1".to_owned(), operation_id);
+
+        assert_eq!(registry.current_owner(&"1".to_owned()), account(OWNER));
+        let agent = registry.load_agent(&"1".to_owned());
+        assert_eq!(agent.authority_epoch, 3, "the generation never rolls back");
+        assert!(agent.executor_grant.is_none());
+        assert!(agent.pending_transfer_call.is_none());
+    }
+
+    #[test]
+    fn a_resolver_accept_on_false_keeps_the_receiver() {
+        let mut registry = authorized();
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        let outcome = registry.nft_transfer_call(
+            account("receiver.test.near"),
+            "1".to_owned(),
+            None,
+            None,
+            "msg".to_owned(),
+        );
+        if let PromiseOrValue::Promise(promise) = outcome {
+            promise.detach();
+        }
+        let operation_id = registry
+            .load_agent(&"1".to_owned())
+            .pending_transfer_call
+            .unwrap()
+            .operation_id;
+
+        env_with_promise(REGISTRY, PromiseResult::Successful(b"false".to_vec()));
+        registry.on_transfer_call_resolved("1".to_owned(), operation_id);
+
+        assert_eq!(
+            registry.current_owner(&"1".to_owned()),
+            account("receiver.test.near")
+        );
+        assert!(registry
+            .load_agent(&"1".to_owned())
+            .pending_transfer_call
+            .is_none());
     }
 }

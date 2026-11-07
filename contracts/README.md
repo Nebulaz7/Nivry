@@ -1,4 +1,4 @@
-# Nivry contracts — Day 1–2
+# Nivry contracts — Day 1–3
 
 Status: **skeleton, not deployed, not audited.** Nothing here has been run against
 a network. It compiles to wasm and has unit tests; the sandbox cross-contract flow
@@ -10,6 +10,10 @@ mint/funding/transfer skeleton, typed contract arguments, and the fixed manifest
 Scope for Day 2: executor grants, monotonic epochs/nonces, the native command
 sequence, pending locks, payout callbacks and reserves, and basic NFT transfer —
 plus the registry-level tests that prove those properties.
+
+Scope for Day 3: the inline fixed-price market (list / cancel / buy), seller
+credits with pull-payment withdrawal, provisioning recovery in the safe direction,
+and the full `nft_transfer_call` lock and resolver with failure tests.
 
 ## Layout
 
@@ -83,7 +87,7 @@ Current artifact sizes from a local build:
 | Artifact | Bytes | SHA-256 |
 | --- | --- | --- |
 | `nivry_agent_wallet.wasm` | 274,121 | `ce3b675e2b3d9ab5a11d8840f0e1cd48471438f6a418ddc3bafce21fca4d8e5e` |
-| `nivry_registry.wasm` | ~893,000 | changes per build; record per release |
+| `nivry_registry.wasm` | ~982,000 | changes per build; record per release |
 
 Hashes are recorded here as **local build observations only**. They are not
 evidence that any deployed account runs this code, and they must be re-verified
@@ -112,6 +116,10 @@ against on-chain bytecode before any immutability claim.
 | `bundle_sha256` | exactly 64 lowercase hex chars | `Manifest::validate` |
 | Identifier (`token_id`, `operation_id`, `payment_reference_hash`) | ≤ 64 bytes | wallet + registry |
 | Grant lifetime | ≤ 90 days | `set_executor` |
+| Listing deposit | exactly 20 × 10²¹ yocto at `list_agent` | `list_agent` |
+| Sale price | exact attachment; no overpayment path | `buy_agent` |
+| Seller credit withdrawal | one unresolved withdrawal per account | `withdraw_sale_proceeds` |
+| `nft_transfer_call` | one unresolved call per token | `nft_transfer_call` |
 | Callback result read | ≤ 256 bytes | `promise_result_checked` |
 | Enumeration page | ≤ 100 tokens | `nft_tokens_for_owner` |
 | Manifest text charset | printable ASCII, excluding `"` and `\` | `Manifest::validate` |
@@ -138,8 +146,18 @@ against on-chain bytecode before any immutability claim.
   operation whose registry callback was lost. The caller cannot assert a result.
 * Treasury (`agent-wallet`): `pay_agent`, `deposit`, `dispatch_native`,
   `finalize_dispatch`, `treasury_info`, `operation_status`.
+* `list_agent` / `cancel_listing` / `buy_agent` — inline fixed-price market in one
+  registry receipt; purchase moves title, epoch, grant, listing and seller credit
+  together.
+* `withdraw_sale_proceeds` / `on_sale_withdrawal_settled` — pull-payment seller
+  credits, reserved before the transfer is scheduled.
+* `nft_transfer_call` / `on_transfer_call_resolved` — provisional ownership with a
+  financial lock, NEP-171 resolution and approval restoration.
+* `reconcile_provisioning` / `on_provisioning_status` — completes a token when the
+  treasury proves the binding after a lost creation callback.
 * Views: `agent_info`, `provisioning_cost`, `wallet_code_hash`,
-  `treasury_account_id`, `next_token_id`.
+  `treasury_account_id`, `next_token_id`, `listing_deposit`, `seller_credit`,
+  `total_seller_credits`, `registry_balance`.
 
 ## Settlement: why there are two steps
 
@@ -172,15 +190,14 @@ without proof.
 
 Not stubbed, not silently downgraded — simply missing:
 
-* `list_agent` / `cancel_listing` / `buy_agent` / `withdraw_sale_proceeds`
-  (Day 3: inline market and seller credits).
 * `nft_approve` — the approval extension is enabled on the standard NFT, but no
-  approve method is exposed yet.
-* `nft_transfer_call` — **rejected with an explicit panic.** Full NEP-171 core
-  support requires provisional ownership, a financial lock and a private resolver.
-  Until that exists this is a **restricted prototype**, not NEP-171 compliant.
-* Reconciliation of `Uncertain` provisioning (the treasury-status reconciler above
-  covers payments, not a lost creation batch).
+  approve method is exposed yet, so this build can restore approvals captured at a
+  transfer-call but cannot create new ones.
+* Refunds from `Uncertain` provisioning. Reconciliation only completes a token; it
+  never refunds, because proving a child account does *not* exist is not something
+  one callback can do safely.
+* Marketplace fees, royalties, auctions, offers and external marketplace
+  integration. The MVP fee is zero.
 
 ## Structural guarantees (not policy)
 
@@ -196,6 +213,22 @@ Not stubbed, not silently downgraded — simply missing:
    authority decision.
 6. Executor authentication uses `predecessor_account_id()`, never a supplied owner
    string and never `signer_account_id()`.
+
+## Inline market and handover
+
+* `list_agent` freezes treasury commands, withdrawals and grant changes. Incoming
+  deposits still land, so a listed agent's balance is not fixed — buyers must read
+  the treasury, not a listing snapshot.
+* `buy_agent` attaches exactly the price. The receipt moves title, authority epoch,
+  dropped grant, consumed listing and the seller's credit together, with no
+  external payout to go wrong. A sale never needs a second transaction.
+* Seller proceeds are a **pull payment**: the registry holds a liability and the
+  seller withdraws it. The credit is reserved before the transfer is scheduled, so a
+  failed or lost callback cannot mint a second claim.
+* `nft_transfer_call` moves the title provisionally and freezes the agent. Only an
+  explicit `false` from the receiver accepts it; `true`, a malformed answer or a
+  failed receiver call return the token. A return restores approvals but **never**
+  the grant or the previous authority generation.
 
 ## Known limitations
 
@@ -213,3 +246,13 @@ Not stubbed, not silently downgraded — simply missing:
   outcome is unreadable. That is deliberate: correctness over gas.
 * `reconcile_operation` needs someone to call it. If every callback is lost and
   nobody reconciles, the agent stays locked — fail-closed, not fail-open.
+* Listing does **not** clear the executor grant; it only freezes it. Cancelling a
+  listing therefore resumes the same grant in the same epoch. Buying clears it.
+* Seller credits are a registry liability. `total_seller_credits` must stay below
+  `registry_balance`; nothing enforces that on-chain, and registry-held funds are
+  not segregated from the storage allowance.
+* An unresolved `nft_transfer_call` that never receives a result leaves the token
+  with the provisional recipient and the agent frozen. There is no timeout unlock,
+  because unlocking on an unproven receiver outcome would be worse.
+* `reconcile_provisioning` only completes a token. A genuinely failed creation
+  batch stays `Uncertain` with the funding held by the registry.

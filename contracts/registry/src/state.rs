@@ -1,4 +1,4 @@
-//! Authoritative per-agent state (PLAN.md §4) and its JSON views.
+//! Authoritative per-agent state (PLAN.md §4, §9, §10) and its JSON views.
 //!
 //! The NFT title in [`near_contract_standards::non_fungible_token::NonFungibleToken`]
 //! is the single source of truth for ownership. This record deliberately does not
@@ -61,6 +61,73 @@ pub struct PendingOperation {
     pub epoch: u64,
 }
 
+/// An inline fixed-price listing (PLAN.md §10).
+///
+/// The price and manifest commitment are captured at listing time and re-checked
+/// at purchase, so a buyer can never be charged a price they did not see.
+#[near(serializers = [borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listing {
+    pub listing_id: u64,
+    pub seller: AccountId,
+    /// Authority epoch at listing time.
+    pub epoch: u64,
+    pub price_yocto: u128,
+    /// The manifest the seller committed to. Buying binds this value.
+    pub manifest_hash: String,
+}
+
+/// An unresolved `nft_transfer_call` (PLAN.md §9).
+///
+/// While this exists the token is financially frozen: no treasury command, owner
+/// withdrawal, grant change, listing, forwarding transfer or manifest change.
+#[near(serializers = [borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingTransferCall {
+    pub operation_id: String,
+    pub receiver_id: AccountId,
+    pub previous_owner: AccountId,
+    /// Approvals captured when the title moved provisionally. Restored only if the
+    /// receiver returns the token. Never used to restore a grant.
+    pub approvals: Vec<(AccountId, u64)>,
+    pub epoch: u64,
+}
+
+/// A pull-payment liability owed by the registry to a seller.
+///
+/// Deliberately separate from agent treasury funds: no child-wallet balance can
+/// ever back a seller credit.
+#[near(serializers = [borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SaleWithdrawal {
+    pub operation_id: String,
+    pub nonce: u64,
+    pub amount_yocto: u128,
+}
+
+#[near(serializers = [borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SellerCredit {
+    /// Claimable now.
+    pub available_yocto: u128,
+    /// Reserved for one in-flight withdrawal.
+    pub reserved_yocto: u128,
+    /// Monotonic application nonce for withdrawal operations.
+    pub next_nonce: u64,
+    pub pending_withdrawal: Option<SaleWithdrawal>,
+}
+
+impl SellerCredit {
+    pub fn new() -> Self {
+        Self {
+            available_yocto: 0,
+            reserved_yocto: 0,
+            next_nonce: 1,
+            pending_withdrawal: None,
+        }
+    }
+}
+
 #[near(serializers = [borsh])]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentRecord {
@@ -75,6 +142,11 @@ pub struct AgentRecord {
     /// Monotonic application nonce. Never reset or reused.
     pub next_command_nonce: u64,
     pub pending_operation: Option<PendingOperation>,
+    /// At most one unresolved `nft_transfer_call`.
+    pub pending_transfer_call: Option<PendingTransferCall>,
+    /// Monotonic per-token listing counter.
+    pub next_listing_id: u64,
+    pub listing: Option<Listing>,
     /// Fixed at creation; never edited in the MVP.
     pub manifest: Manifest,
     pub manifest_hash: String,
@@ -140,6 +212,57 @@ impl From<&PendingOperation> for PendingOperationView {
 
 #[near(serializers = [json])]
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListingView {
+    pub listing_id: u64,
+    pub seller: AccountId,
+    pub epoch: u64,
+    pub price_yocto: U128,
+    pub manifest_hash: String,
+}
+
+impl From<&Listing> for ListingView {
+    fn from(listing: &Listing) -> Self {
+        Self {
+            listing_id: listing.listing_id,
+            seller: listing.seller.clone(),
+            epoch: listing.epoch,
+            price_yocto: U128(listing.price_yocto),
+            manifest_hash: listing.manifest_hash.clone(),
+        }
+    }
+}
+
+#[near(serializers = [json])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingTransferCallView {
+    pub operation_id: String,
+    pub receiver_id: AccountId,
+    pub previous_owner: AccountId,
+    pub epoch: u64,
+}
+
+impl From<&PendingTransferCall> for PendingTransferCallView {
+    fn from(pending: &PendingTransferCall) -> Self {
+        Self {
+            operation_id: pending.operation_id.clone(),
+            receiver_id: pending.receiver_id.clone(),
+            previous_owner: pending.previous_owner.clone(),
+            epoch: pending.epoch,
+        }
+    }
+}
+
+#[near(serializers = [json])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SellerCreditView {
+    pub account_id: AccountId,
+    pub available_yocto: U128,
+    pub reserved_yocto: U128,
+    pub pending_withdrawal_operation_id: Option<String>,
+}
+
+#[near(serializers = [json])]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentInfo {
     pub token_id: String,
     /// Read from the NFT title, never a cached copy.
@@ -152,6 +275,8 @@ pub struct AgentInfo {
     pub executor_grant: Option<GrantView>,
     pub next_command_nonce: u64,
     pub pending_operation: Option<PendingOperationView>,
+    pub pending_transfer_call: Option<PendingTransferCallView>,
+    pub listing: Option<ListingView>,
     pub manifest: Manifest,
     pub manifest_hash: String,
 }
@@ -172,6 +297,11 @@ impl AgentRecord {
                 .pending_operation
                 .as_ref()
                 .map(PendingOperationView::from),
+            pending_transfer_call: self
+                .pending_transfer_call
+                .as_ref()
+                .map(PendingTransferCallView::from),
+            listing: self.listing.as_ref().map(ListingView::from),
             manifest: self.manifest.clone(),
             manifest_hash: self.manifest_hash.clone(),
         }

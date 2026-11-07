@@ -1,12 +1,15 @@
-# Nivry contracts — Day 1
+# Nivry contracts — Day 1–2
 
 Status: **skeleton, not deployed, not audited.** Nothing here has been run against
 a network. It compiles to wasm and has unit tests; the sandbox cross-contract flow
 is still a gate (see "Not done yet").
 
-Scope for this day (PLAN.md §19, Day 1):
-minimal registry + keyless child factory, mint/funding/transfer skeleton, typed
-contract arguments, and the fixed manifest.
+Scope for Day 1 (PLAN.md §19): minimal registry + keyless child factory,
+mint/funding/transfer skeleton, typed contract arguments, and the fixed manifest.
+
+Scope for Day 2: executor grants, monotonic epochs/nonces, the native command
+sequence, pending locks, payout callbacks and reserves, and basic NFT transfer —
+plus the registry-level tests that prove those properties.
 
 ## Layout
 
@@ -80,7 +83,7 @@ Current artifact sizes from a local build:
 | Artifact | Bytes | SHA-256 |
 | --- | --- | --- |
 | `nivry_agent_wallet.wasm` | 274,121 | `ce3b675e2b3d9ab5a11d8840f0e1cd48471438f6a418ddc3bafce21fca4d8e5e` |
-| `nivry_registry.wasm` | ~877,000 | changes per build; record per release |
+| `nivry_registry.wasm` | ~893,000 | changes per build; record per release |
 
 Hashes are recorded here as **local build observations only**. They are not
 evidence that any deployed account runs this code, and they must be re-verified
@@ -128,11 +131,42 @@ against on-chain bytecode before any immutability claim.
   cap, cumulative budget, expiry, exact next nonce).
 * `owner_withdraw` — same dispatch path, no grant budget.
 * `on_dispatch_settled` — private settlement from the treasury's own recorded
-  result; uncertain outcomes stay locked.
+  result; an unreadable result is **not** guessed. See "Settlement" below.
+* `on_dispatch_status` — private resolution of the treasury's persisted operation
+  status, used to prove or refute an unreadable outcome.
+* `reconcile_operation` — anyone may trigger the same fixed status query for an
+  operation whose registry callback was lost. The caller cannot assert a result.
 * Treasury (`agent-wallet`): `pay_agent`, `deposit`, `dispatch_native`,
   `finalize_dispatch`, `treasury_info`, `operation_status`.
 * Views: `agent_info`, `provisioning_cost`, `wallet_code_hash`,
   `treasury_account_id`, `next_token_id`.
+
+## Settlement: why there are two steps
+
+A failed promise chain is **not** proof that a transfer failed — the transfer may
+have succeeded before finalization failed. So the registry never infers an outcome.
+
+1. `on_dispatch_settled` reads the outcome the treasury itself returned from
+   `finalize_dispatch`.
+2. If that result is unreadable (failed chain, missing result, unparseable
+   payload), the registry chains a fixed `operation_status` query and resolves it
+   in `on_dispatch_status`.
+
+| Treasury status | Meaning | Effect |
+| --- | --- | --- |
+| `null` | never scheduled a transfer for this operation | release lock, restore budget |
+| `failed` | terminal, transfer did not complete | release lock, restore budget |
+| `succeeded` | terminal, transfer executed | release lock, budget stays spent |
+| `pending` | transfer emitted, finalization unknown | **stay locked** |
+| query failed | no proof available | **stay locked** |
+
+`null` is a sound proof because `dispatch_native` validates everything **before**
+writing its operation record: a rejected call leaves no record behind. That is what
+makes it safe to release a lock after a wallet-side rejection, instead of deadlocking
+the agent forever.
+
+In every case the nonce stays consumed. Nothing is retried, and nothing is refunded
+without proof.
 
 ## Deliberately absent
 
@@ -145,9 +179,8 @@ Not stubbed, not silently downgraded — simply missing:
 * `nft_transfer_call` — **rejected with an explicit panic.** Full NEP-171 core
   support requires provisional ownership, a financial lock and a private resolver.
   Until that exists this is a **restricted prototype**, not NEP-171 compliant.
-* `reconcile_operation` — a lost registry callback leaves the pending lock in
-  place. Fail-closed is intended; recovery is out of Day-1 scope.
-* Reconciliation of `Uncertain` provisioning.
+* Reconciliation of `Uncertain` provisioning (the treasury-status reconciler above
+  covers payments, not a lost creation batch).
 
 ## Structural guarantees (not policy)
 
@@ -176,3 +209,7 @@ Not stubbed, not silently downgraded — simply missing:
 * `nft_transfer` resets `frozen = false` for the new owner. The freeze is the
   current owner's stop; inheriting it would block the buyer's first grant.
 * Provisioning and settlement paths are untested against a live network.
+* Settlement can take a third receipt (status query + resolver) when the first
+  outcome is unreadable. That is deliberate: correctness over gas.
+* `reconcile_operation` needs someone to call it. If every callback is lost and
+  nobody reconciles, the agent stays locked — fail-closed, not fail-open.

@@ -26,6 +26,7 @@ pub use state::{
 
 use near_contract_standards::non_fungible_token::core::NonFungibleTokenCore;
 use near_contract_standards::non_fungible_token::enumeration::NonFungibleTokenEnumeration;
+use near_contract_standards::non_fungible_token::events::NftMint;
 use near_contract_standards::non_fungible_token::metadata::{NFTContractMetadata, TokenMetadata};
 use near_contract_standards::non_fungible_token::{NonFungibleToken, Token, TokenId};
 use near_sdk::borsh::BorshSerialize;
@@ -55,6 +56,8 @@ pub const REGISTRY_STORAGE_ALLOWANCE_YOCTO: u128 = 30_000_000_000_000_000_000_00
 pub const CREATE_AGENT_GAS: Gas = Gas::from_tgas(60);
 pub const DISPATCH_GAS: Gas = Gas::from_tgas(40);
 pub const SETTLE_GAS: Gas = Gas::from_tgas(25);
+/// Gas for the fixed `operation_status` query used to prove an unreadable outcome.
+pub const STATUS_GAS: Gas = Gas::from_tgas(20);
 
 pub const MAX_RECIPIENTS: usize = 8;
 pub const MAX_CALLBACK_RESULT_BYTES: usize = 256;
@@ -101,10 +104,38 @@ struct WalletDispatchOutcome {
     status: String,
 }
 
+/// The treasury's persisted view of its retained operation, as returned by the
+/// fixed `operation_status` query (a JSON `null` when it has no record).
+#[near(serializers = [json])]
+struct WalletOperationView {
+    operation_id: String,
+    status: String,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Settlement {
     Succeeded,
     Failed,
+    /// The treasury has no record of the operation, so it never scheduled a
+    /// transfer for it. This is the only way to prove a rejection and safely
+    /// release the lock after a failed call.
+    NotDispatched,
+}
+
+impl Settlement {
+    fn label(self) -> &'static str {
+        match self {
+            Settlement::Succeeded => "succeeded",
+            Settlement::Failed => "failed",
+            Settlement::NotDispatched => "not_dispatched",
+        }
+    }
+
+    /// True only when no value left the treasury for this operation, which is what
+    /// permits restoring the reserved grant budget.
+    fn released_value(self) -> bool {
+        !matches!(self, Settlement::Succeeded)
+    }
 }
 
 #[near(contract_state)]
@@ -295,8 +326,23 @@ impl Registry {
         match env::promise_result_checked(0, MAX_CALLBACK_RESULT_BYTES) {
             Ok(_) => {
                 let metadata = Self::token_metadata(&agent);
-                self.tokens
-                    .internal_mint(token_id.clone(), agent.funder.clone(), Some(metadata));
+                // `internal_mint` demands an attached storage deposit and bounces a
+                // refund to the predecessor. The factory already collected the deposit
+                // in `create_agent` and pays storage from its own balance, so the
+                // non-refunding path is correct; it omits the NEP-171 mint event, so
+                // that is emitted explicitly here.
+                self.tokens.internal_mint_with_refund(
+                    token_id.clone(),
+                    agent.funder.clone(),
+                    Some(metadata),
+                    None,
+                );
+                NftMint {
+                    owner_id: &agent.funder,
+                    token_ids: &[token_id.as_str()],
+                    memo: None,
+                }
+                .emit();
                 agent.lifecycle = Lifecycle::Ready;
                 emit(
                     "agent_ready",
@@ -594,10 +640,11 @@ impl Registry {
 
     /// Private settlement of one dispatched operation.
     ///
-    /// Settles only from the treasury's own recorded result. A failed promise, a
-    /// missing result, an unparseable result or a mismatched operation id all leave
-    /// the pending record in place: uncertain outcomes stay fail-closed, and
-    /// nothing is retried or refunded.
+    /// Settles only from the treasury's own recorded result. When that result is
+    /// unreadable — a failed promise chain, a missing result, an unparseable
+    /// payload — this does **not** guess, because a failed chain may mean "transfer
+    /// succeeded, then finalization failed". Instead it asks the treasury for its
+    /// persisted operation status and lets that proof decide.
     #[private]
     pub fn on_dispatch_settled(
         &mut self,
@@ -605,89 +652,128 @@ impl Registry {
         operation_id: String,
         authority_epoch: u64,
     ) {
-        let mut agent = match self.agents.get(&token_id) {
-            Some(agent) => agent.clone(),
-            None => {
-                emit(
-                    "dispatch_uncertain",
-                    json!({ "token_id": token_id, "operation_id": operation_id, "reason": "unknown_agent" }),
-                );
-                return;
-            }
-        };
-
-        let pending = match agent.pending_operation.clone() {
-            Some(pending)
-                if pending.operation_id == operation_id && pending.epoch == authority_epoch =>
-            {
-                pending
-            }
-            _ => {
-                emit(
-                    "dispatch_uncertain",
-                    json!({ "token_id": token_id, "operation_id": operation_id, "reason": "operation_mismatch" }),
-                );
-                return;
-            }
-        };
-
-        let settlement = if env::promise_results_count() != 1 {
+        let readable = if env::promise_results_count() != 1 {
             None
         } else {
-            match env::promise_result_checked(0, MAX_CALLBACK_RESULT_BYTES) {
-                Ok(bytes) => {
-                    match near_sdk::serde_json::from_slice::<WalletDispatchOutcome>(&bytes) {
-                        Ok(outcome) if outcome.operation_id == operation_id => {
-                            match outcome.status.as_str() {
-                                "succeeded" => Some(Settlement::Succeeded),
-                                "failed" => Some(Settlement::Failed),
-                                _ => None,
-                            }
-                        }
+            env::promise_result_checked(0, MAX_CALLBACK_RESULT_BYTES)
+                .ok()
+                .and_then(|bytes| {
+                    near_sdk::serde_json::from_slice::<WalletDispatchOutcome>(&bytes).ok()
+                })
+                .and_then(|outcome| {
+                    if outcome.operation_id != operation_id {
+                        return None;
+                    }
+                    match outcome.status.as_str() {
+                        "succeeded" => Some(Settlement::Succeeded),
+                        "failed" => Some(Settlement::Failed),
+                        _ => None,
+                    }
+                })
+        };
+
+        match readable {
+            Some(settlement) => {
+                self.settle_pending(&token_id, &operation_id, authority_epoch, settlement);
+            }
+            None => {
+                emit(
+                    "dispatch_unproven",
+                    json!({
+                        "token_id": token_id,
+                        "operation_id": operation_id,
+                        "action": "query_operation_status",
+                    }),
+                );
+                self.request_operation_status(token_id, operation_id, authority_epoch)
+                    .detach();
+            }
+        }
+    }
+
+    /// Private resolution of the treasury's persisted operation status.
+    ///
+    /// Three outcomes matter, and only two of them release the lock:
+    ///
+    /// * `null`            -> the treasury never scheduled a transfer: not dispatched
+    /// * `succeeded`/`failed` -> a terminal result persisted by the treasury itself
+    /// * pending or unreadable -> stay locked (fail-closed), never retry or refund
+    #[private]
+    pub fn on_dispatch_status(
+        &mut self,
+        token_id: String,
+        operation_id: String,
+        authority_epoch: u64,
+    ) {
+        let parsed: Option<Option<WalletOperationView>> = if env::promise_results_count() != 1 {
+            None
+        } else {
+            env::promise_result_checked(0, MAX_CALLBACK_RESULT_BYTES)
+                .ok()
+                .and_then(|bytes| {
+                    near_sdk::serde_json::from_slice::<Option<WalletOperationView>>(&bytes).ok()
+                })
+        };
+
+        let settlement = match parsed {
+            // The status query itself failed or returned garbage: prove nothing.
+            None => None,
+            // A successful query with no record means nothing was ever dispatched.
+            Some(None) => Some(Settlement::NotDispatched),
+            Some(Some(view)) => {
+                if view.operation_id != operation_id {
+                    None
+                } else {
+                    match view.status.as_str() {
+                        "succeeded" => Some(Settlement::Succeeded),
+                        "failed" => Some(Settlement::Failed),
                         _ => None,
                     }
                 }
-                Err(_) => None,
             }
         };
 
-        let settlement = match settlement {
-            Some(settlement) => settlement,
+        match settlement {
+            Some(settlement) => {
+                self.settle_pending(&token_id, &operation_id, authority_epoch, settlement);
+            }
             None => {
                 emit(
                     "dispatch_uncertain",
-                    json!({ "token_id": token_id, "operation_id": operation_id, "reason": "unproven_outcome" }),
+                    json!({
+                        "token_id": token_id,
+                        "operation_id": operation_id,
+                        "reason": "treasury_status_unreadable",
+                    }),
+                );
+            }
+        }
+    }
+
+    /// Settle an operation whose registry callback was lost.
+    ///
+    /// The caller cannot assert an outcome: this only triggers the same fixed status
+    /// query, and the private resolver decides. Permitted for anyone so a stuck
+    /// agent can be reconciled, and it does nothing once the operation is settled.
+    pub fn reconcile_operation(&mut self, token_id: String, operation_id: String) {
+        let agent = self.load_agent(&token_id);
+        let pending = match agent.pending_operation.as_ref() {
+            Some(pending) if pending.operation_id == operation_id => pending.clone(),
+            _ => {
+                emit(
+                    "reconcile_ignored",
+                    json!({
+                        "token_id": token_id,
+                        "operation_id": operation_id,
+                        "reason": "no_matching_pending_operation",
+                    }),
                 );
                 return;
             }
         };
 
-        // A proven failure restores the reserved grant budget; success keeps it
-        // spent. The nonce is never reused either way.
-        if settlement == Settlement::Failed && pending.kind == OperationKind::ExecutorPayment {
-            if let Some(mut grant) = agent.executor_grant.clone() {
-                if grant.epoch == pending.epoch {
-                    grant.spent_yocto = grant
-                        .spent_yocto
-                        .saturating_sub(pending.reserved_budget_yocto);
-                    agent.executor_grant = Some(grant);
-                }
-            }
-        }
-
-        agent.pending_operation = None;
-        self.agents.insert(token_id.clone(), agent);
-
-        emit(
-            "dispatch_settled",
-            json!({
-                "token_id": token_id,
-                "operation_id": operation_id,
-                "status": if settlement == Settlement::Succeeded { "succeeded" } else { "failed" },
-                "recipient": pending.recipient,
-                "amount_yocto": U128(pending.amount_yocto),
-            }),
-        );
+        self.request_operation_status(token_id, operation_id, pending.epoch)
+            .detach();
     }
 
     // ---- NEP-171 and views ---------------------------------------------
@@ -894,6 +980,119 @@ impl Registry {
             .saturating_add(REGISTRY_STORAGE_ALLOWANCE_YOCTO)
     }
 
+    /// Chains the fixed `operation_status` view call with the private resolver.
+    ///
+    /// This is a read, not an assertion: the resolver refreshes state itself and the
+    /// answer can only settle an operation the registry already recorded as pending.
+    pub(crate) fn request_operation_status(
+        &self,
+        token_id: String,
+        operation_id: String,
+        authority_epoch: u64,
+    ) -> Promise {
+        let treasury_account_id = self
+            .agents
+            .get(&token_id)
+            .expect("unknown agent token")
+            .treasury_account_id
+            .clone();
+
+        let query_args = serialize(&json!({ "operation_id": operation_id }));
+        let resolve_args = serialize(&json!({
+            "token_id": token_id,
+            "operation_id": operation_id,
+            "authority_epoch": authority_epoch,
+        }));
+
+        Promise::new(treasury_account_id)
+            .function_call(
+                "operation_status".to_owned(),
+                query_args,
+                ZERO_YOCTO,
+                STATUS_GAS,
+            )
+            .then(Promise::new(env::current_account_id()).function_call(
+                "on_dispatch_status".to_owned(),
+                resolve_args,
+                ZERO_YOCTO,
+                SETTLE_GAS,
+            ))
+    }
+
+    /// Applies a *proven* settlement to the pending operation.
+    ///
+    /// Returns `false` when there is no matching pending operation, so a duplicate
+    /// or stale callback cannot mutate anything. Budget is restored only when the
+    /// settlement proves no value left the treasury.
+    pub(crate) fn settle_pending(
+        &mut self,
+        token_id: &str,
+        operation_id: &str,
+        authority_epoch: u64,
+        settlement: Settlement,
+    ) -> bool {
+        let mut agent = match self.agents.get(&token_id.to_owned()) {
+            Some(agent) => agent.clone(),
+            None => {
+                emit(
+                    "dispatch_uncertain",
+                    json!({
+                        "token_id": token_id,
+                        "operation_id": operation_id,
+                        "reason": "unknown_agent",
+                    }),
+                );
+                return false;
+            }
+        };
+
+        let pending = match agent.pending_operation.clone() {
+            Some(pending)
+                if pending.operation_id == operation_id && pending.epoch == authority_epoch =>
+            {
+                pending
+            }
+            _ => {
+                emit(
+                    "dispatch_uncertain",
+                    json!({
+                        "token_id": token_id,
+                        "operation_id": operation_id,
+                        "reason": "operation_mismatch",
+                    }),
+                );
+                return false;
+            }
+        };
+
+        if settlement.released_value() && pending.kind == OperationKind::ExecutorPayment {
+            if let Some(mut grant) = agent.executor_grant.clone() {
+                if grant.epoch == pending.epoch {
+                    grant.spent_yocto = grant
+                        .spent_yocto
+                        .saturating_sub(pending.reserved_budget_yocto);
+                    agent.executor_grant = Some(grant);
+                }
+            }
+        }
+
+        // The nonce stays consumed either way: it is never reused.
+        agent.pending_operation = None;
+        self.agents.insert(token_id.to_owned(), agent);
+
+        emit(
+            "dispatch_settled",
+            json!({
+                "token_id": token_id,
+                "operation_id": operation_id,
+                "status": settlement.label(),
+                "recipient": pending.recipient,
+                "amount_yocto": U128(pending.amount_yocto),
+            }),
+        );
+        true
+    }
+
     /// Consume the nonce, record the pending operation, then emit the fixed wallet
     /// command. Order matters: the lock exists before any promise is scheduled.
     pub(crate) fn schedule_dispatch(
@@ -997,4 +1196,371 @@ fn emit(event: &str, data: Value) {
 
 fn serialize(value: &Value) -> Vec<u8> {
     near_sdk::serde_json::to_vec(value).expect("serialize contract arguments")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use near_sdk::test_utils::VMContextBuilder;
+    use near_sdk::{testing_env, NearToken};
+
+    const REGISTRY: &str = "registry.test.near";
+    const OWNER: &str = "owner.test.near";
+    const BUYER: &str = "buyer.test.near";
+    const EXECUTOR: &str = "executor.test.near";
+    const RECIPIENT: &str = "recipient.test.near";
+    const TREASURY: &str = "00000001.registry.test.near";
+
+    fn account(id: &str) -> AccountId {
+        id.parse().unwrap()
+    }
+
+    fn env_as(predecessor: &str) -> VMContextBuilder {
+        let mut builder = VMContextBuilder::new();
+        builder
+            .current_account_id(account(REGISTRY))
+            .predecessor_account_id(account(predecessor))
+            .block_timestamp(1_000_000_000)
+            .account_balance(NearToken::from_near(100));
+        builder
+    }
+
+    fn manifest() -> Manifest {
+        Manifest {
+            schema_version: "1".to_owned(),
+            name: "Docs Reporter".to_owned(),
+            description: "Produces a repository documentation report.".to_owned(),
+            runtime_hint: "hermes".to_owned(),
+            bundle_sha256: "a".repeat(64),
+            task_kind: "docs_report_v1".to_owned(),
+            manifest_uri: "https://example.invalid/bundles/docs-reporter.tar.gz".to_owned(),
+        }
+    }
+
+    fn record() -> AgentRecord {
+        let manifest = manifest();
+        AgentRecord {
+            lifecycle: Lifecycle::Ready,
+            treasury_account_id: account(TREASURY),
+            authority_epoch: 1,
+            ownership_change_count: 0,
+            frozen: false,
+            executor_grant: None,
+            next_command_nonce: 1,
+            pending_operation: None,
+            manifest_hash: manifest.sha256_hex(),
+            manifest,
+            funder: account(OWNER),
+        }
+    }
+
+    /// A ready, minted agent owned by OWNER, with no grant installed.
+    fn ready_registry() -> Registry {
+        testing_env!(env_as(OWNER).build());
+        let mut registry = Registry::new(account(OWNER));
+        registry.tokens.internal_mint_with_refund(
+            "1".to_owned(),
+            account(OWNER),
+            Some(TokenMetadata::default()),
+            None,
+        );
+        registry.agents.insert("1".to_owned(), record());
+        registry
+    }
+
+    fn grant(cap: u128, budget: u128) -> GrantArg {
+        GrantArg {
+            executor_id: account(EXECUTOR),
+            recipients: vec![account(RECIPIENT)],
+            per_payment_cap: U128(cap),
+            total_budget: U128(budget),
+            expires_at_ns: U64(4_000_000_000),
+        }
+    }
+
+    fn authorized() -> Registry {
+        let mut registry = ready_registry();
+        registry.set_executor("1".to_owned(), 1, grant(1_000, 2_000));
+        registry
+    }
+
+    fn pay(registry: &mut Registry, epoch: u64, nonce: u64, amount: u128) {
+        registry
+            .execute_payment(
+                "1".to_owned(),
+                account(OWNER),
+                epoch,
+                nonce,
+                account(RECIPIENT),
+                U128(amount),
+                U64(4_000_000_000),
+            )
+            .detach();
+    }
+
+    // ---- grants and epochs ---------------------------------------------
+
+    #[test]
+    fn setting_an_executor_rotates_authority() {
+        let registry = authorized();
+        let agent = registry.load_agent(&"1".to_owned());
+        assert_eq!(agent.authority_epoch, 2);
+        let installed = agent.executor_grant.expect("grant installed");
+        assert_eq!(installed.executor_id, account(EXECUTOR));
+        assert_eq!(installed.epoch, 2);
+        assert_eq!(installed.owner_at_grant, account(OWNER));
+        assert_eq!(installed.spent_yocto, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected_epoch is stale")]
+    fn setting_an_executor_rejects_a_stale_epoch() {
+        let mut registry = ready_registry();
+        registry.set_executor("1".to_owned(), 99, grant(1_000, 2_000));
+    }
+
+    #[test]
+    #[should_panic(expected = "only the current token owner may call this")]
+    fn only_the_owner_can_authorize() {
+        let mut registry = ready_registry();
+        testing_env!(env_as(EXECUTOR).build());
+        registry.set_executor("1".to_owned(), 1, grant(1_000, 2_000));
+    }
+
+    #[test]
+    #[should_panic(expected = "executor is already bound to another agent")]
+    fn one_executor_cannot_serve_two_agents() {
+        let mut registry = ready_registry();
+        registry.agents.insert("2".to_owned(), record());
+        registry
+            .executor_token
+            .insert(account(EXECUTOR), "2".to_owned());
+        registry.set_executor("1".to_owned(), 1, grant(1_000, 2_000));
+    }
+
+    #[test]
+    fn revoking_clears_the_grant_and_advances_the_epoch() {
+        let mut registry = authorized();
+        registry.revoke_executor("1".to_owned(), 2);
+        let agent = registry.load_agent(&"1".to_owned());
+        assert_eq!(agent.authority_epoch, 3);
+        assert!(agent.executor_grant.is_none());
+        assert!(!registry.executor_token.contains_key(&account(EXECUTOR)));
+    }
+
+    #[test]
+    fn freezing_clears_the_grant_and_unfreezing_does_not_restore_it() {
+        let mut registry = authorized();
+        registry.set_frozen("1".to_owned(), 2, true);
+        let frozen = registry.load_agent(&"1".to_owned());
+        assert!(frozen.frozen);
+        assert_eq!(frozen.authority_epoch, 3);
+        assert!(frozen.executor_grant.is_none());
+
+        registry.set_frozen("1".to_owned(), 3, false);
+        let thawed = registry.load_agent(&"1".to_owned());
+        assert!(!thawed.frozen);
+        assert_eq!(thawed.authority_epoch, 4);
+        assert!(thawed.executor_grant.is_none(), "unfreeze must not restore");
+    }
+
+    // ---- payment authorization -----------------------------------------
+
+    #[test]
+    fn payment_consumes_the_nonce_and_reserves_budget() {
+        let mut registry = authorized();
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, 2, 1, 400);
+
+        let agent = registry.load_agent(&"1".to_owned());
+        assert_eq!(agent.next_command_nonce, 2);
+        assert_eq!(agent.executor_grant.as_ref().unwrap().spent_yocto, 400);
+        let pending = agent.pending_operation.expect("operation recorded");
+        assert_eq!(pending.operation_id, "1:1");
+        assert_eq!(pending.epoch, 2);
+        assert_eq!(pending.reserved_budget_yocto, 400);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount exceeds the per-payment cap")]
+    fn payment_rejects_an_amount_over_the_per_payment_cap() {
+        let mut registry = authorized();
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, 2, 1, 1_001);
+    }
+
+    #[test]
+    #[should_panic(expected = "recipient is not in the grant allowlist")]
+    fn payment_rejects_a_recipient_outside_the_allowlist() {
+        let mut registry = authorized();
+        testing_env!(env_as(EXECUTOR).build());
+        registry
+            .execute_payment(
+                "1".to_owned(),
+                account(OWNER),
+                2,
+                1,
+                account("stranger.test.near"),
+                U128(10),
+                U64(4_000_000_000),
+            )
+            .detach();
+    }
+
+    #[test]
+    #[should_panic(expected = "nonce is not the next expected nonce")]
+    fn payment_rejects_a_replayed_nonce() {
+        let mut registry = authorized();
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, 2, 5, 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "predecessor is not the authorized executor")]
+    fn payment_rejects_a_non_executor_predecessor() {
+        let mut registry = authorized();
+        testing_env!(env_as(OWNER).build());
+        pay(&mut registry, 2, 1, 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount exceeds the remaining grant budget")]
+    fn cumulative_budget_cannot_be_evaded_by_fresh_transactions() {
+        let mut registry = ready_registry();
+        registry.set_executor("1".to_owned(), 1, grant(1_000, 1_500));
+        testing_env!(env_as(EXECUTOR).build());
+
+        pay(&mut registry, 2, 1, 1_000);
+        assert!(registry.settle_pending("1", "1:1", 2, Settlement::Succeeded));
+        // A fresh transaction with a valid nonce still cannot exceed the budget.
+        pay(&mut registry, 2, 2, 1_000);
+    }
+
+    // ---- pending locks -------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "agent has an unresolved treasury command")]
+    fn a_pending_operation_blocks_transfer() {
+        let mut registry = authorized();
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, 2, 1, 100);
+
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        registry.nft_transfer(account(BUYER), "1".to_owned(), None, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "agent has an unresolved treasury command")]
+    fn a_pending_operation_blocks_grant_changes() {
+        let mut registry = authorized();
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, 2, 1, 100);
+
+        testing_env!(env_as(OWNER).build());
+        registry.revoke_executor("1".to_owned(), 2);
+    }
+
+    // ---- reserves and settlement ---------------------------------------
+
+    #[test]
+    fn a_proven_failure_restores_the_reserved_budget() {
+        let mut registry = authorized();
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, 2, 1, 700);
+
+        assert!(registry.settle_pending("1", "1:1", 2, Settlement::Failed));
+        let agent = registry.load_agent(&"1".to_owned());
+        assert_eq!(agent.executor_grant.as_ref().unwrap().spent_yocto, 0);
+        assert!(agent.pending_operation.is_none());
+        assert_eq!(agent.next_command_nonce, 2, "the nonce is never reused");
+    }
+
+    #[test]
+    fn an_undispatched_operation_releases_the_lock_and_restores_budget() {
+        let mut registry = authorized();
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, 2, 1, 700);
+
+        assert!(registry.settle_pending("1", "1:1", 2, Settlement::NotDispatched));
+        let agent = registry.load_agent(&"1".to_owned());
+        assert_eq!(agent.executor_grant.as_ref().unwrap().spent_yocto, 0);
+        assert!(agent.pending_operation.is_none());
+    }
+
+    #[test]
+    fn a_duplicate_settlement_cannot_mutate_state() {
+        let mut registry = authorized();
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, 2, 1, 100);
+
+        assert!(registry.settle_pending("1", "1:1", 2, Settlement::Succeeded));
+        assert!(
+            !registry.settle_pending("1", "1:1", 2, Settlement::Succeeded),
+            "a repeated callback must be inert"
+        );
+        assert_eq!(
+            registry
+                .load_agent(&"1".to_owned())
+                .executor_grant
+                .unwrap()
+                .spent_yocto,
+            100,
+            "a duplicate must not consume or refund budget"
+        );
+    }
+
+    #[test]
+    fn reconcile_ignores_an_operation_that_is_not_pending() {
+        let mut registry = authorized();
+        registry.reconcile_operation("1".to_owned(), "1:99".to_owned());
+        assert!(registry
+            .load_agent(&"1".to_owned())
+            .pending_operation
+            .is_none());
+    }
+
+    // ---- handover -------------------------------------------------------
+
+    #[test]
+    fn transfer_advances_authority_and_preserves_the_treasury() {
+        let mut registry = authorized();
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        registry.nft_transfer(account(BUYER), "1".to_owned(), None, None);
+
+        let agent = registry.load_agent(&"1".to_owned());
+        assert_eq!(registry.current_owner(&"1".to_owned()), account(BUYER));
+        assert_eq!(agent.authority_epoch, 3, "authority rotates on transfer");
+        assert_eq!(agent.ownership_change_count, 1);
+        assert!(agent.executor_grant.is_none());
+        assert_eq!(agent.treasury_account_id, account(TREASURY));
+        assert_eq!(agent.next_command_nonce, 1, "the nonce must not reset");
+        assert!(!registry.executor_token.contains_key(&account(EXECUTOR)));
+    }
+
+    #[test]
+    #[should_panic(expected = "agent has no authorized executor")]
+    fn a_stale_executor_cannot_pay_after_handover() {
+        let mut registry = authorized();
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        registry.nft_transfer(account(BUYER), "1".to_owned(), None, None);
+
+        testing_env!(env_as(EXECUTOR).build());
+        registry
+            .execute_payment(
+                "1".to_owned(),
+                account(BUYER),
+                3,
+                1,
+                account(RECIPIENT),
+                U128(10),
+                U64(4_000_000_000),
+            )
+            .detach();
+    }
 }

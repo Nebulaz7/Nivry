@@ -217,6 +217,66 @@ async fn day_one_provisioning_payout_and_handover() -> Result<()> {
         "recipient balance should increase: {before:?} -> {after:?}"
     );
 
+    // --- 4b: a locked agent still accepts incoming payments; version holds ---
+    let before_lock: serde_json::Value = registry
+        .view("agent_info")
+        .args_json(json!({ "token_id": "1" }))
+        .await?
+        .json()?;
+    let version_before = before_lock["version"].as_u64().unwrap();
+    let epoch_before = before_lock["authority_epoch"].as_u64().unwrap();
+
+    eprintln!("[step] lock");
+    owner
+        .call(registry.id(), "set_frozen")
+        .args_json(json!({
+            "token_id": "1",
+            "expected_version": version_before,
+            "frozen": true,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?
+        .into_result()?;
+
+    // Incoming payment while locked must succeed and must NOT move the version.
+    customer
+        .call(&treasury_id, "pay_agent")
+        .args_json(json!({ "payment_reference_hash": "ref-locked", "observed_authority_epoch": epoch_before }))
+        .deposit(NearToken::from_millinear(5))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let after_lock: serde_json::Value = registry
+        .view("agent_info")
+        .args_json(json!({ "token_id": "1" }))
+        .await?
+        .json()?;
+    assert_eq!(after_lock["frozen"], true, "agent must be locked");
+    assert_eq!(
+        after_lock["version"].as_u64().unwrap(),
+        version_before + 1,
+        "only the lock moved the version; the payment must not"
+    );
+
+    // Unlock before the handover so the token is in a clean state.
+    let lock_version = after_lock["version"].as_u64().unwrap();
+    owner
+        .call(registry.id(), "set_frozen")
+        .args_json(json!({
+            "token_id": "1",
+            "expected_version": lock_version,
+            "frozen": false,
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?
+        .into_result()?;
+
     // --- 5: handover invalidates the old executor, keeps the treasury ---
     let buyer = worker.dev_create_account().await?;
     let treasury_before = worker.view_account(&treasury_id).await?.balance;

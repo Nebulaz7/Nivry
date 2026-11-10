@@ -282,6 +282,7 @@ impl Registry {
                 lifecycle: Lifecycle::Provisioning,
                 treasury_account_id: treasury_account_id.clone(),
                 authority_epoch: 1,
+                version: 1,
                 ownership_change_count: 0,
                 frozen: false,
                 executor_grant: None,
@@ -460,7 +461,9 @@ impl Registry {
             .authority_epoch
             .checked_add(1)
             .expect("authority epoch overflow");
+        agent.version = agent.version.checked_add(1).expect("version overflow");
         let epoch = agent.authority_epoch;
+        let version = agent.version;
         agent.executor_grant = Some(ExecutorGrant {
             executor_id: grant.executor_id.clone(),
             owner_at_grant: owner,
@@ -481,6 +484,7 @@ impl Registry {
                 "token_id": token_id,
                 "executor_id": grant.executor_id,
                 "authority_epoch": epoch,
+                "version": version,
                 "per_payment_cap": grant.per_payment_cap,
                 "total_budget": grant.total_budget,
                 "expires_at_ns": grant.expires_at_ns,
@@ -508,7 +512,9 @@ impl Registry {
             .authority_epoch
             .checked_add(1)
             .expect("authority epoch overflow");
+        agent.version = agent.version.checked_add(1).expect("version overflow");
         let epoch = agent.authority_epoch;
+        let version = agent.version;
         self.agents.insert(token_id.clone(), agent);
 
         emit(
@@ -517,27 +523,50 @@ impl Registry {
                 "token_id": token_id,
                 "executor_id": grant.executor_id,
                 "authority_epoch": epoch,
+                "version": version,
             }),
         );
     }
 
-    /// Owner emergency stop.
+    /// Owner stop / "for sale" lock.
     ///
-    /// Permitted while a command is unresolved: it invalidates future
-    /// authorization but never cancels an already-emitted payment and never clears
-    /// its pending record. Unfreezing does not restore the cleared grant.
-    pub fn set_frozen(&mut self, token_id: String, expected_epoch: u64, frozen: bool) {
+    /// Blocks every outflow. It is also the single listing prerequisite: the lock
+    /// is what guarantees a buyer that outflows cannot change between the version
+    /// they inspected and the purchase.
+    ///
+    /// Rejected while a treasury command or transfer call is unresolved, so the
+    /// agent's `version` cannot change between dispatch and settlement.
+    ///
+    /// Owner-only and requires exactly 1 yoctoNEAR. A NEP-178 approval can never
+    /// call this, because authority is checked against the predecessor account.
+    #[payable]
+    pub fn set_frozen(&mut self, token_id: String, expected_version: u64, frozen: bool) {
         let _owner = self.require_owner(&token_id);
+        require!(
+            env::attached_deposit() == ONE_YOCTO,
+            "Requires attached deposit of exactly 1 yoctoNEAR"
+        );
         let mut agent = self.load_agent(&token_id);
         require!(agent.lifecycle == Lifecycle::Ready, "agent is not ready");
         require!(
-            agent.authority_epoch == expected_epoch,
-            "expected_epoch is stale"
+            agent.pending_operation.is_none(),
+            "agent has an unresolved treasury command"
+        );
+        require!(
+            agent.pending_transfer_call.is_none(),
+            "agent has an unresolved transfer call"
+        );
+        require!(
+            agent.version == expected_version,
+            "expected_version is stale"
+        );
+        require!(
+            agent.frozen != frozen,
+            "agent is already in the requested lock state"
         );
 
-        // Freezing a listed token cancels the listing first, atomically, before the
-        // epoch advances (PLAN.md §8), so the seller cannot leave a live listing on
-        // an agent they just stopped.
+        // Locking or unlocking ends a listing: a listing only exists while locked,
+        // and unlocking is how a seller delists.
         agent.listing = None;
 
         if let Some(grant) = agent.executor_grant.take() {
@@ -548,12 +577,19 @@ impl Registry {
             .authority_epoch
             .checked_add(1)
             .expect("authority epoch overflow");
+        agent.version = agent.version.checked_add(1).expect("version overflow");
         let epoch = agent.authority_epoch;
+        let version = agent.version;
         self.agents.insert(token_id.clone(), agent);
 
         emit(
             "freeze_changed",
-            json!({ "token_id": token_id, "frozen": frozen, "authority_epoch": epoch }),
+            json!({
+                "token_id": token_id,
+                "frozen": frozen,
+                "authority_epoch": epoch,
+                "version": version,
+            }),
         );
     }
 
@@ -826,13 +862,14 @@ impl Registry {
 
     // ---- inline market -------------------------------------------------
 
-    /// Fixed-price listing. Freezes outgoing treasury commands, owner withdrawals
-    /// and authority changes until cancellation or purchase (PLAN.md §10).
+    /// Fixed-price listing.
     ///
-    /// The seller prepays storage so a later purchase never consumes the buyer's
-    /// price for listing/credit bookkeeping.
+    /// Requires the agent to be **locked** first: the lock is the single "for sale"
+    /// mechanism, and it guarantees that the outflows a buyer inspected cannot
+    /// change between listing and purchase. The seller prepays storage so a later
+    /// purchase never consumes the buyer's price for bookkeeping.
     #[payable]
-    pub fn list_agent(&mut self, token_id: String, expected_epoch: u64, price: U128) -> u64 {
+    pub fn list_agent(&mut self, token_id: String, expected_version: u64, price: U128) -> u64 {
         require!(
             env::attached_deposit().as_yoctonear() == LISTING_STORAGE_DEPOSIT_YOCTO,
             "attach exactly the published listing storage deposit"
@@ -842,20 +879,20 @@ impl Registry {
         let mut agent = self.load_agent(&token_id);
         self.require_ready_idle(&agent);
         require!(agent.listing.is_none(), "agent is already listed");
-        require!(!agent.frozen, "agent is frozen");
+        require!(agent.frozen, "lock the agent before listing it for sale");
         require!(
-            agent.authority_epoch == expected_epoch,
-            "expected_epoch is stale"
+            agent.version == expected_version,
+            "expected_version is stale"
         );
         require!(price.0 > 0, "price must be positive");
 
         let listing_id = agent.next_listing_id;
         agent.next_listing_id = listing_id.checked_add(1).expect("listing id overflow");
-        let epoch = agent.authority_epoch;
+        let version = agent.version;
         agent.listing = Some(Listing {
             listing_id,
             seller: seller.clone(),
-            epoch,
+            version,
             price_yocto: price.0,
             manifest_hash: agent.manifest_hash.clone(),
         });
@@ -868,13 +905,16 @@ impl Registry {
                 "listing_id": listing_id,
                 "seller": seller,
                 "price_yocto": price,
-                "authority_epoch": epoch,
+                "version": version,
             }),
         );
         listing_id
     }
 
-    /// Remove a listing. Does not restore a grant cleared by a freeze.
+    /// Delist: remove the listing and clear the lock.
+    ///
+    /// Clearing the lock is part of delisting so a failed sale cannot trap the agent,
+    /// and it advances `version` because the buyer-visible state changed.
     pub fn cancel_listing(&mut self, token_id: String, listing_id: u64) {
         let _seller = self.require_owner(&token_id);
         let mut agent = self.load_agent(&token_id);
@@ -883,13 +923,20 @@ impl Registry {
             listing.listing_id == listing_id,
             "listing_id does not match the live listing"
         );
+        require!(
+            agent.pending_operation.is_none(),
+            "agent has an unresolved treasury command"
+        );
 
         agent.listing = None;
+        agent.frozen = false;
+        agent.version = agent.version.checked_add(1).expect("version overflow");
+        let version = agent.version;
         self.agents.insert(token_id.clone(), agent);
 
         emit(
             "agent_listing_cancelled",
-            json!({ "token_id": token_id, "listing_id": listing_id }),
+            json!({ "token_id": token_id, "listing_id": listing_id, "version": version }),
         );
     }
 
@@ -904,7 +951,7 @@ impl Registry {
         &mut self,
         token_id: String,
         listing_id: u64,
-        expected_epoch: u64,
+        expected_version: u64,
         expected_manifest_hash: String,
     ) -> AccountId {
         let mut agent = self.load_agent(&token_id);
@@ -921,13 +968,14 @@ impl Registry {
             listing.seller == self.current_owner(&token_id),
             "the listed seller is no longer the token owner"
         );
+        require!(agent.frozen, "the agent is no longer locked for sale");
         require!(
-            agent.authority_epoch == expected_epoch,
-            "expected_epoch is stale"
+            agent.version == expected_version,
+            "expected_version is stale"
         );
         require!(
-            listing.epoch == expected_epoch,
-            "listing epoch does not match expected_epoch"
+            listing.version == expected_version,
+            "listing version does not match expected_version"
         );
         require!(
             listing.manifest_hash == expected_manifest_hash,
@@ -956,6 +1004,7 @@ impl Registry {
             .authority_epoch
             .checked_add(1)
             .expect("authority epoch overflow");
+        agent.version = agent.version.checked_add(1).expect("version overflow");
         agent.ownership_change_count = agent
             .ownership_change_count
             .checked_add(1)
@@ -963,6 +1012,7 @@ impl Registry {
         agent.frozen = false;
         agent.listing = None;
         let epoch = agent.authority_epoch;
+        let version = agent.version;
         self.agents.insert(token_id.clone(), agent);
 
         self.credit_seller(&listing.seller, listing.price_yocto);
@@ -976,6 +1026,7 @@ impl Registry {
                 "buyer": buyer,
                 "price_yocto": U128(listing.price_yocto),
                 "authority_epoch": epoch,
+                "version": version,
             }),
         );
         buyer
@@ -1278,8 +1329,10 @@ impl Registry {
         // would otherwise block the buyer's own first grant. The treasury binding
         // and `next_command_nonce` are untouched.
         agent.frozen = false;
+        agent.version = agent.version.checked_add(1).expect("version overflow");
 
         let epoch = agent.authority_epoch;
+        let version = agent.version;
         let changes = agent.ownership_change_count;
         self.agents.insert(token_id.clone(), agent);
         emit(
@@ -1290,6 +1343,7 @@ impl Registry {
                 "to": receiver_id,
                 "authority_epoch": epoch,
                 "ownership_change_count": changes,
+                "version": version,
             }),
         );
     }
@@ -1344,8 +1398,10 @@ impl Registry {
             .checked_add(1)
             .expect("ownership change count overflow");
         agent.frozen = false;
+        agent.version = agent.version.checked_add(1).expect("version overflow");
 
         let epoch = agent.authority_epoch;
+        let version = agent.version;
         let operation_id = format!("{token_id}:tc:{epoch}");
         agent.pending_transfer_call = Some(PendingTransferCall {
             operation_id: operation_id.clone(),
@@ -1366,6 +1422,7 @@ impl Registry {
                 "receiver_id": receiver_id,
                 "previous_owner": previous_owner,
                 "authority_epoch": epoch,
+                "version": version,
             }),
         );
 
@@ -1470,6 +1527,9 @@ impl Registry {
             }
         }
 
+        // A return is a second ownership change: the version advances again and the
+        // binding stays cleared.
+        agent.version = agent.version.checked_add(1).expect("version overflow");
         agent.pending_transfer_call = None;
         self.agents.insert(token_id.clone(), agent);
         emit(
@@ -1724,6 +1784,20 @@ impl Registry {
             }
         };
 
+        if agent.version != pending.version_at_dispatch {
+            // State moved while the command was in flight, so no outcome here can be
+            // trusted. Fail closed and leave the pending record in place.
+            emit(
+                "dispatch_uncertain",
+                json!({
+                    "token_id": token_id,
+                    "operation_id": operation_id,
+                    "reason": "version_changed_in_flight",
+                }),
+            );
+            return false;
+        }
+
         if settlement.released_value() && pending.kind == OperationKind::ExecutorPayment {
             if let Some(mut grant) = agent.executor_grant.clone() {
                 if grant.epoch == pending.epoch {
@@ -1766,6 +1840,10 @@ impl Registry {
         let nonce = agent.next_command_nonce;
         agent.next_command_nonce = nonce.checked_add(1).expect("nonce overflow");
         let epoch = agent.authority_epoch;
+        // An outflow is a buyer-visible state change, and the version recorded here
+        // is what settlement re-checks.
+        agent.version = agent.version.checked_add(1).expect("version overflow");
+        let version = agent.version;
         let treasury_account_id = agent.treasury_account_id.clone();
         let operation_id = format!("{token_id}:{nonce}");
 
@@ -1777,6 +1855,7 @@ impl Registry {
             amount_yocto,
             reserved_budget_yocto,
             epoch,
+            version_at_dispatch: version,
         });
         self.agents.insert(token_id.clone(), agent);
 
@@ -1902,6 +1981,7 @@ mod tests {
             lifecycle: Lifecycle::Ready,
             treasury_account_id: account(TREASURY),
             authority_epoch: 1,
+            version: 1,
             ownership_change_count: 0,
             frozen: false,
             executor_grant: None,
@@ -2013,12 +2093,18 @@ mod tests {
     #[test]
     fn freezing_clears_the_grant_and_unfreezing_does_not_restore_it() {
         let mut registry = authorized();
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
         registry.set_frozen("1".to_owned(), 2, true);
         let frozen = registry.load_agent(&"1".to_owned());
         assert!(frozen.frozen);
         assert_eq!(frozen.authority_epoch, 3);
         assert!(frozen.executor_grant.is_none());
 
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
         registry.set_frozen("1".to_owned(), 3, false);
         let thawed = registry.load_agent(&"1".to_owned());
         assert!(!thawed.frozen);
@@ -2238,14 +2324,27 @@ mod tests {
         );
     }
 
+    /// A locked, minted agent owned by OWNER with an active listing.
+    ///
+    /// Locking is required before listing, so this walks the real sequence:
+    /// authorize (version 2) -> lock (version 3) -> list (still version 3).
     fn listed_registry(price: u128) -> Registry {
         let mut registry = authorized();
         testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        registry.set_frozen("1".to_owned(), 2, true);
+        testing_env!(env_as(OWNER)
             .attached_deposit(NearToken::from_yoctonear(LISTING_STORAGE_DEPOSIT_YOCTO))
             .build());
-        let listing_id = registry.list_agent("1".to_owned(), 2, U128(price));
+        let version = version_of(&registry);
+        let listing_id = registry.list_agent("1".to_owned(), version, U128(price));
         assert_eq!(listing_id, 1);
         registry
+    }
+
+    fn version_of(registry: &Registry) -> u64 {
+        registry.load_agent(&"1".to_owned()).version
     }
 
     fn manifest_hash(registry: &Registry) -> String {
@@ -2257,7 +2356,7 @@ mod tests {
     fn listing_freezes_treasury_commands() {
         let mut registry = listed_registry(5_000);
         testing_env!(env_as(EXECUTOR).build());
-        pay(&mut registry, 2, 1, 100);
+        pay(&mut registry, 3, 1, 100);
     }
 
     #[test]
@@ -2265,7 +2364,7 @@ mod tests {
     fn listing_freezes_grant_changes() {
         let mut registry = listed_registry(5_000);
         testing_env!(env_as(OWNER).build());
-        registry.revoke_executor("1".to_owned(), 2);
+        registry.revoke_executor("1".to_owned(), 3);
     }
 
     #[test]
@@ -2286,12 +2385,14 @@ mod tests {
         testing_env!(env_as(BUYER)
             .attached_deposit(NearToken::from_yoctonear(5_000))
             .build());
-        let buyer = registry.buy_agent("1".to_owned(), 1, 2, hash);
+        let buyer = registry.buy_agent("1".to_owned(), 1, version_of(&registry), hash);
         assert_eq!(buyer, account(BUYER));
 
         assert_eq!(registry.current_owner(&"1".to_owned()), account(BUYER));
         let agent = registry.load_agent(&"1".to_owned());
-        assert_eq!(agent.authority_epoch, 3);
+        assert_eq!(agent.authority_epoch, 4);
+        assert_eq!(agent.version, 4);
+        assert!(!agent.frozen, "lock resets on ownership change");
         assert_eq!(agent.ownership_change_count, 1);
         assert!(agent.executor_grant.is_none());
         assert!(agent.listing.is_none());
@@ -2315,7 +2416,7 @@ mod tests {
         testing_env!(env_as(BUYER)
             .attached_deposit(NearToken::from_yoctonear(4_999))
             .build());
-        registry.buy_agent("1".to_owned(), 1, 2, hash);
+        registry.buy_agent("1".to_owned(), 1, version_of(&registry), hash);
     }
 
     #[test]
@@ -2325,7 +2426,7 @@ mod tests {
         testing_env!(env_as(BUYER)
             .attached_deposit(NearToken::from_yoctonear(5_000))
             .build());
-        registry.buy_agent("1".to_owned(), 1, 2, "b".repeat(64));
+        registry.buy_agent("1".to_owned(), 1, version_of(&registry), "b".repeat(64));
     }
 
     #[test]
@@ -2333,10 +2434,19 @@ mod tests {
         let mut registry = listed_registry(5_000);
         testing_env!(env_as(OWNER).build());
         registry.cancel_listing("1".to_owned(), 1);
-        assert!(registry.load_agent(&"1".to_owned()).listing.is_none());
 
+        let unlocked = registry.load_agent(&"1".to_owned());
+        assert!(unlocked.listing.is_none());
+        assert!(!unlocked.frozen, "delisting clears the lock");
+
+        // The lock cleared the grant, so a fresh grant is required before spending.
+        registry.set_executor(
+            "1".to_owned(),
+            unlocked.authority_epoch,
+            grant(1_000, 2_000),
+        );
         testing_env!(env_as(EXECUTOR).build());
-        pay(&mut registry, 2, 1, 100);
+        pay(&mut registry, 4, 1, 100);
         assert!(registry
             .load_agent(&"1".to_owned())
             .pending_operation
@@ -2344,14 +2454,19 @@ mod tests {
     }
 
     #[test]
-    fn freezing_cancels_an_active_listing() {
+    fn unlocking_cancels_an_active_listing() {
         let mut registry = listed_registry(5_000);
-        testing_env!(env_as(OWNER).build());
-        registry.set_frozen("1".to_owned(), 2, true);
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        let version = version_of(&registry);
+        registry.set_frozen("1".to_owned(), version, false);
+
         let agent = registry.load_agent(&"1".to_owned());
-        assert!(agent.frozen);
+        assert!(!agent.frozen);
         assert!(agent.listing.is_none());
-        assert_eq!(agent.authority_epoch, 3);
+        assert_eq!(agent.authority_epoch, 4);
+        assert_eq!(agent.version, version + 1);
     }
 
     // ---- day 3: seller credits -----------------------------------------
@@ -2362,7 +2477,7 @@ mod tests {
         testing_env!(env_as(BUYER)
             .attached_deposit(NearToken::from_yoctonear(5_000))
             .build());
-        registry.buy_agent("1".to_owned(), 1, 2, hash);
+        registry.buy_agent("1".to_owned(), 1, version_of(&registry), hash);
         registry
     }
 
@@ -2489,6 +2604,10 @@ mod tests {
         assert_eq!(registry.current_owner(&"1".to_owned()), account(OWNER));
         let agent = registry.load_agent(&"1".to_owned());
         assert_eq!(agent.authority_epoch, 3, "the generation never rolls back");
+        assert_eq!(
+            agent.version, 4,
+            "provisional move and rollback both advance the version"
+        );
         assert!(agent.executor_grant.is_none());
         assert!(agent.pending_transfer_call.is_none());
     }
@@ -2636,6 +2755,134 @@ mod tests {
         testing_env!(env_as(BUYER)
             .attached_deposit(NearToken::from_yoctonear(5_000))
             .build());
-        registry.buy_agent("1".to_owned(), 1, 2, hash);
+        registry.buy_agent("1".to_owned(), 1, version_of(&registry), hash);
+    }
+
+    // ---- version / lock guarantee ---------------------------------------
+
+    #[test]
+    #[should_panic(expected = "expected_version is stale")]
+    fn a_stale_expected_version_cannot_buy_after_a_delist_and_relist() {
+        let mut registry = listed_registry(5_000);
+        let inspected_version = version_of(&registry);
+        let hash = manifest_hash(&registry);
+
+        // Delist, spend, relock and relist. Each step moves the version.
+        testing_env!(env_as(OWNER).build());
+        registry.cancel_listing("1".to_owned(), 1);
+        let epoch = registry.load_agent(&"1".to_owned()).authority_epoch;
+        registry.set_executor("1".to_owned(), epoch, grant(1_000, 2_000));
+
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, epoch + 1, 1, 100);
+        assert!(registry.settle_pending("1", "1:1", epoch + 1, Settlement::Succeeded));
+
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        let version = version_of(&registry);
+        registry.set_frozen("1".to_owned(), version, true);
+
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(LISTING_STORAGE_DEPOSIT_YOCTO))
+            .build());
+        let version = version_of(&registry);
+        assert_eq!(registry.list_agent("1".to_owned(), version, U128(5_000)), 2);
+
+        // Buying with the version the buyer inspected before the relist must fail.
+        testing_env!(env_as(BUYER)
+            .attached_deposit(NearToken::from_yoctonear(5_000))
+            .build());
+        registry.buy_agent("1".to_owned(), 2, inspected_version, hash);
+    }
+
+    #[test]
+    fn buying_resets_the_lock_and_advances_the_version() {
+        let mut registry = listed_registry(5_000);
+        let hash = manifest_hash(&registry);
+        let before = registry.load_agent(&"1".to_owned());
+
+        testing_env!(env_as(BUYER)
+            .attached_deposit(NearToken::from_yoctonear(5_000))
+            .build());
+        registry.buy_agent("1".to_owned(), 1, before.version, hash);
+
+        let after = registry.load_agent(&"1".to_owned());
+        assert!(!after.frozen, "the lock resets on ownership change");
+        assert!(after.listing.is_none());
+        assert!(after.executor_grant.is_none(), "the old binding is cleared");
+        assert_eq!(after.version, before.version + 1);
+        assert_eq!(after.authority_epoch, before.authority_epoch + 1);
+        assert_eq!(registry.current_owner(&"1".to_owned()), account(BUYER));
+    }
+
+    #[test]
+    #[should_panic(expected = "only the current token owner may call this")]
+    fn the_previous_owner_cannot_withdraw_after_a_sale() {
+        let mut registry = listed_registry(5_000);
+        let hash = manifest_hash(&registry);
+        testing_env!(env_as(BUYER)
+            .attached_deposit(NearToken::from_yoctonear(5_000))
+            .build());
+        registry.buy_agent("1".to_owned(), 1, version_of(&registry), hash);
+
+        let after = registry.load_agent(&"1".to_owned());
+        testing_env!(env_as(OWNER).build());
+        registry
+            .owner_withdraw(
+                "1".to_owned(),
+                after.authority_epoch,
+                after.next_command_nonce,
+                account(RECIPIENT),
+                U128(10),
+            )
+            .detach();
+    }
+
+    #[test]
+    #[should_panic(expected = "agent has an unresolved treasury command")]
+    fn locking_is_rejected_while_an_outflow_is_pending() {
+        let mut registry = authorized();
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, 2, 1, 100);
+
+        let version = version_of(&registry);
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        registry.set_frozen("1".to_owned(), version, true);
+    }
+
+    #[test]
+    #[should_panic(expected = "agent is frozen")]
+    fn a_locked_agent_cannot_spend() {
+        let mut registry = authorized();
+        let version = version_of(&registry);
+        testing_env!(env_as(OWNER)
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        registry.set_frozen("1".to_owned(), version, true);
+
+        testing_env!(env_as(EXECUTOR).build());
+        pay(&mut registry, 3, 1, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the current token owner may call this")]
+    fn an_approved_account_cannot_call_owner_methods() {
+        let mut registry = ready_registry();
+
+        // A NEP-178 approval moves the title, never agent authority.
+        let mut approvals = std::collections::HashMap::new();
+        approvals.insert(account(BUYER), 1u64);
+        registry
+            .tokens
+            .approvals_by_id
+            .as_mut()
+            .expect("approval extension enabled")
+            .insert(&"1".to_owned(), &approvals);
+
+        testing_env!(env_as(BUYER).build());
+        registry.set_frozen("1".to_owned(), 1, true);
     }
 }

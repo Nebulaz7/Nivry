@@ -59,6 +59,10 @@ pub struct PendingOperation {
     /// Grant budget held for this operation, restored only on proven failure.
     pub reserved_budget_yocto: u128,
     pub epoch: u64,
+    /// Buyer-visible version recorded when this operation was dispatched. If the
+    /// agent's version differs at settlement, something changed in flight and the
+    /// operation is left unresolved rather than settled.
+    pub version_at_dispatch: u64,
 }
 
 /// An inline fixed-price listing (PLAN.md §10).
@@ -70,8 +74,8 @@ pub struct PendingOperation {
 pub struct Listing {
     pub listing_id: u64,
     pub seller: AccountId,
-    /// Authority epoch at listing time.
-    pub epoch: u64,
+    /// Agent `version` at listing time. Purchase must present the same version.
+    pub version: u64,
     pub price_yocto: u128,
     /// The manifest the seller committed to. Buying binds this value.
     pub manifest_hash: String,
@@ -136,7 +140,12 @@ pub struct AgentRecord {
     pub treasury_account_id: AccountId,
     /// Monotonic authority generation. NOT NEAR's blockchain epoch.
     pub authority_epoch: u64,
+    /// Buyer-visible state version. Increases on owner change (including a
+    /// transfer-call rollback), lock change, binding (executor) change and every
+    /// scheduled outflow. Never increases on incoming payments, never decreases.
+    pub version: u64,
     pub ownership_change_count: u64,
+    /// Owner stop / "for sale" lock. Blocks all outflows while set.
     pub frozen: bool,
     pub executor_grant: Option<ExecutorGrant>,
     /// Monotonic application nonce. Never reset or reused.
@@ -215,7 +224,7 @@ impl From<&PendingOperation> for PendingOperationView {
 pub struct ListingView {
     pub listing_id: u64,
     pub seller: AccountId,
-    pub epoch: u64,
+    pub version: u64,
     pub price_yocto: U128,
     pub manifest_hash: String,
 }
@@ -225,7 +234,7 @@ impl From<&Listing> for ListingView {
         Self {
             listing_id: listing.listing_id,
             seller: listing.seller.clone(),
-            epoch: listing.epoch,
+            version: listing.version,
             price_yocto: U128(listing.price_yocto),
             manifest_hash: listing.manifest_hash.clone(),
         }
@@ -271,6 +280,8 @@ pub struct AgentInfo {
     pub owner_id: Option<AccountId>,
     pub treasury_account_id: AccountId,
     pub authority_epoch: u64,
+    /// Buyer-visible state version. See [`AgentRecord::version`].
+    pub version: u64,
     pub ownership_change_count: u64,
     pub lifecycle: Lifecycle,
     pub frozen: bool,
@@ -290,6 +301,7 @@ impl AgentRecord {
             owner_id,
             treasury_account_id: self.treasury_account_id.clone(),
             authority_epoch: self.authority_epoch,
+            version: self.version,
             ownership_change_count: self.ownership_change_count,
             lifecycle: self.lifecycle,
             frozen: self.frozen,

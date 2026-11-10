@@ -75,6 +75,19 @@ and its epoch; `private` = near-sdk `#[private]`, so only this contract can call
    owner, `internal_transfer` failed with "sender not approved". Now an explicit
    `the listed seller is no longer the token owner` check runs first.
 
+### Fixed after running on a real node
+
+4. **`new()` hashed the 274 KB embedded treasury WASM.** That cost more gas than a
+   default call receives, so initialization failed on a real node. The hash is now
+   computed in `build.rs` and embedded, so `new()` does no hashing.
+5. **`WALLET_INITIAL_BALANCE` was 0.05 NEAR.** NEAR requires an account to stake its
+   own code at 1e19 yocto per byte, and the treasury WASM is ~274 KB ≈ 2.74 NEAR, so
+   every provisioning batch failed for lack of storage. Raised to 3 NEAR.
+6. **Caller gas was never specified.** `near-workspaces` defaults to 10 TGas per
+   call, which is below what provisioning and dispatch need. `CREATE_AGENT_GAS` is
+   now 100 TGas (the deploy + init inside the batch) and callers must attach ~300
+   TGas. Minimums are documented in the README.
+
 **Accepted, and documented as limitations**
 
 4. The listing deposit is not refunded on `cancel_listing`.
@@ -97,4 +110,5 @@ bash scripts/with-rust-toolchain.sh bash scripts/test-contracts.sh
 bash scripts/test-contracts.sh
 ```
 
-Current count: **60 tests** (12 treasury, 48 registry).
+Current count: **60 unit tests** (12 treasury, 48 registry) plus **1 sandbox
+cross-contract test**, all passing.

@@ -1,8 +1,9 @@
 # Nivry contracts — Day 1–3
 
-Status: **skeleton, not deployed, not audited.** Nothing here has been run against
-a network. It compiles to wasm and has unit tests; the sandbox cross-contract flow
-is still a gate (see "Not done yet").
+Status: **skeleton, not deployed, not audited.** It compiles to wasm, has 60 unit
+tests, and the sandbox cross-contract flow (provision → pay → bounded payout →
+handover) passes on a local NEAR sandbox. No testnet deployment exists yet, and
+nothing here has been audited.
 
 Scope for Day 1 (PLAN.md §19): minimal registry + keyless child factory,
 mint/funding/transfer skeleton, typed contract arguments, and the fixed manifest.
@@ -94,7 +95,7 @@ Current artifact sizes from a local build:
 | Artifact | Bytes | SHA-256 |
 | --- | --- | --- |
 | `nivry_agent_wallet.wasm` | 274,121 | `ce3b675e2b3d9ab5a11d8840f0e1cd48471438f6a418ddc3bafce21fca4d8e5e` |
-| `nivry_registry.wasm` | ~983,000 | changes per build; record per release |
+| `nivry_registry.wasm` | ~982,000 | changes per build; record per release |
 
 Hashes are recorded here as **local build observations only**. They are not
 evidence that any deployed account runs this code, and they must be re-verified
@@ -166,6 +167,43 @@ against on-chain bytecode before any immutability claim.
 * Views: `agent_info`, `provisioning_cost`, `wallet_code_hash`,
   `treasury_account_id`, `next_token_id`, `listing_deposit`, `seller_credit`,
   `total_seller_credits`, `registry_balance`.
+
+## Sandbox verification
+
+`integration-tests/tests/sandbox.rs` runs against a real `near-sandbox` node and
+proves the whole Day-1 lifecycle in one test:
+
+1. the registry initializes;
+2. `create_agent` provisions a **separate** treasury account, funded, with code and
+   **zero access keys**, and the treasury itself reports the correct
+   `(registry, token_id)` binding;
+3. a customer `pay_agent` is recorded as a payment;
+4. the owner installs an executor and a bounded payout settles, with the pending
+   lock clearing only after the treasury reports an outcome;
+5. `nft_transfer` moves the title, clears the grant, keeps the same treasury
+   address, and the previous owner's executor is **rejected** afterwards.
+
+Run it with `scripts/build-contracts.sh` first (it reads the built artifacts), then
+`scripts/test-contracts.sh`.
+
+### Two operational facts this surfaced
+
+**1. Provisioning costs ~3.03 NEAR, and almost all of it is storage.** NEAR requires
+an account to stake its own deployed code at 1e19 yocto per byte. The treasury WASM
+is ~274 KB, so ≈ 2.74 NEAR of the deposit is code storage. Shrinking that WASM
+directly reduces mint cost; `WALLET_INITIAL_BALANCE` is 3 NEAR to cover it plus the
+unspendable operating reserve.
+
+**2. Callers must attach explicit gas.** `near-workspaces` defaults to **10 TGas**
+per call, which is far below what these methods need. Recommended minimums:
+
+| Method | Caller gas |
+| --- | --- |
+| `create_agent` | 300 TGas (deploys the treasury) |
+| `execute_payment`, `owner_withdraw` | 150 TGas (forwards 40 + 25) |
+| `nft_transfer`, `buy_agent`, `list_agent` | 100 TGas |
+| `nft_transfer_call` | 100 TGas minimum, enforced on chain |
+| `new` | 200 TGas |
 
 ## Settlement: why there are two steps
 

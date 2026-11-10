@@ -10,6 +10,10 @@ publish.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[build-dependencies]
+# Hashes the pinned treasury WASM at build time instead of on chain.
+sha2 = "0.11"
+
 [dependencies]
 near-sdk = { workspace = true }
 near-contract-standards = { workspace = true }

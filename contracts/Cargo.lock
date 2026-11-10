@@ -1585,6 +1585,7 @@ version = "0.1.0"
 dependencies = [
  "near-contract-standards",
  "near-sdk",
+ "sha2 0.11.1",
 ]
 
 [[package]]

@@ -10,7 +10,6 @@ node_modules/
 dist/
 *.tsbuildinfo
 .npm/
-docs/
 ISSUES.md
 # Never commit secrets (HACKATHON.md: keys belong in environment variables)
 .env

@@ -14,7 +14,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use near_workspaces::network::Sandbox;
-use near_workspaces::types::NearToken;
+use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::{AccountId, Contract, Worker};
 use serde_json::json;
 use std::path::PathBuf;
@@ -76,9 +76,11 @@ async fn day_one_provisioning_payout_and_handover() -> Result<()> {
         .dev_deploy(&artifact("nivry_registry.wasm")?)
         .await?;
     let owner = worker.dev_create_account().await?;
+    eprintln!("[step] init registry");
     registry
         .call("new")
         .args_json(json!({ "owner_id": owner.id() }))
+        .gas(Gas::from_tgas(200))
         .transact()
         .await?
         .into_result()?;
@@ -92,10 +94,12 @@ async fn day_one_provisioning_payout_and_handover() -> Result<()> {
     assert!(cost.as_yoctonear() > 0);
 
     let manifest: serde_json::Value = serde_json::from_str(MANIFEST)?;
+    eprintln!("[step] create_agent");
     owner
         .call(registry.id(), "create_agent")
         .args_json(json!({ "manifest": manifest, "expected_cost": cost.as_yoctonear().to_string() }))
         .deposit(cost)
+        .gas(Gas::from_tgas(300))
         .transact()
         .await?
         .into_result()?;
@@ -104,12 +108,18 @@ async fn day_one_provisioning_payout_and_handover() -> Result<()> {
     let treasury_id: AccountId = info["treasury_account_id"].as_str().unwrap().parse()?;
     assert_ne!(treasury_id, *registry.id(), "treasury must be its own account");
 
-    // The treasury is real, has code, and has no access keys: the structural claim.
+    // The treasury is real, funded, correctly bound, and carries no access keys.
     let treasury = worker.view_account(&treasury_id).await?;
     assert!(
-        treasury.code_hash != near_workspaces::types::CryptoHash::default(),
-        "treasury must have deployed code"
+        treasury.balance.as_yoctonear() > 0,
+        "treasury must be funded"
     );
+    let binding: serde_json::Value = worker
+        .view(&treasury_id, "treasury_info")
+        .await?
+        .json()?;
+    assert_eq!(binding["registry"], registry.id().as_str());
+    assert_eq!(binding["token_id"], "1");
     let keys = worker.view_access_keys(&treasury_id).await?;
     assert!(
         keys.is_empty(),
@@ -118,16 +128,18 @@ async fn day_one_provisioning_payout_and_handover() -> Result<()> {
 
     // --- 3: a customer payment is recorded, not inferred ----------------
     let customer = worker.dev_create_account().await?;
+    eprintln!("[step] pay_agent");
     customer
-        .call(treasury_id.clone(), "pay_agent")
+        .call(&treasury_id, "pay_agent")
         .args_json(json!({ "payment_reference_hash": "ref-1", "observed_authority_epoch": 1 }))
         .deposit(NearToken::from_millinear(20))
+        .gas(Gas::from_tgas(100))
         .transact()
         .await?
         .into_result()?;
 
     let treasury_info: serde_json::Value = customer
-        .view(treasury_id.clone(), "treasury_info")
+        .view(&treasury_id, "treasury_info")
         .await?
         .json()?;
     assert_eq!(treasury_info["recorded_payment_count"], 1);
@@ -135,7 +147,12 @@ async fn day_one_provisioning_payout_and_handover() -> Result<()> {
     // --- 4: a bounded executor payout settles ---------------------------
     let executor = worker.dev_create_account().await?;
     let epoch = info["authority_epoch"].as_u64().unwrap();
-    owner
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos() as u64;
+    let expires_at_ns = (now_ns + 30 * 24 * 60 * 60 * 1_000_000_000u64).to_string();
+    eprintln!("[step] set_executor");
+    let set_exec = owner
         .call(registry.id(), "set_executor")
         .args_json(json!({
             "token_id": "1",
@@ -145,12 +162,13 @@ async fn day_one_provisioning_payout_and_handover() -> Result<()> {
                 "recipients": [customer.id()],
                 "per_payment_cap": NearToken::from_millinear(10).as_yoctonear().to_string(),
                 "total_budget": NearToken::from_millinear(30).as_yoctonear().to_string(),
-                "expires_at_ns": "9999999999999999999",
+                "expires_at_ns": expires_at_ns,
             }
         }))
+        .gas(Gas::from_tgas(150))
         .transact()
-        .await?
-        .into_result()?;
+        .await?;
+    set_exec.into_result()?;
 
     let after_grant: serde_json::Value = registry
         .view("agent_info")
@@ -161,6 +179,7 @@ async fn day_one_provisioning_payout_and_handover() -> Result<()> {
     let nonce = after_grant["next_command_nonce"].as_u64().unwrap();
 
     let before = worker.view_account(customer.id()).await?.balance;
+    eprintln!("[step] execute_payment");
     let payment = executor
         .call(registry.id(), "execute_payment")
         .args_json(json!({
@@ -172,6 +191,7 @@ async fn day_one_provisioning_payout_and_handover() -> Result<()> {
             "amount": NearToken::from_millinear(5).as_yoctonear().to_string(),
             "deadline_ns": "9999999999999999999",
         }))
+        .gas(Gas::from_tgas(150))
         .transact()
         .await?;
     payment.into_result()?;
@@ -201,10 +221,12 @@ async fn day_one_provisioning_payout_and_handover() -> Result<()> {
     let buyer = worker.dev_create_account().await?;
     let treasury_before = worker.view_account(&treasury_id).await?.balance;
     let transfer_epoch = settled["authority_epoch"].as_u64().unwrap();
+    eprintln!("[step] nft_transfer");
     owner
         .call(registry.id(), "nft_transfer")
         .args_json(json!({ "receiver_id": buyer.id(), "token_id": "1" }))
         .deposit(NearToken::from_yoctonear(1))
+        .gas(Gas::from_tgas(100))
         .transact()
         .await?
         .into_result()?;
@@ -238,6 +260,7 @@ async fn day_one_provisioning_payout_and_handover() -> Result<()> {
             "amount": NearToken::from_millinear(1).as_yoctonear().to_string(),
             "deadline_ns": "9999999999999999999",
         }))
+        .gas(Gas::from_tgas(150))
         .transact()
         .await?;
     assert!(

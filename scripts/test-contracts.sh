@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 #
-# Contract unit tests. These run on the host target, which needs a linker:
-# on Windows use `bash scripts/with-rust-toolchain.sh bash scripts/test-contracts.sh`.
-# On WSL/Linux the system toolchain works directly.
+# Contract unit tests, then the sandbox cross-contract test.
+#
+# The sandbox test reads the built WASM artifacts, so run
+# `scripts/build-contracts.sh` first (it is the source of those bytes).
+#
+# On Windows use the toolchain wrapper:
+#   bash scripts/with-rust-toolchain.sh bash scripts/test-contracts.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,6 +16,8 @@ echo "==> contract unit tests"
 cargo test --workspace
 
 echo
-echo "Sandbox cross-contract tests are not wired up yet."
-echo "They require a built artifact set plus a runnable NEAR sandbox, which is a"
-echo "separate Day-1/2 gate. See docs/spikes.md (pending)."
+echo "==> sandbox cross-contract tests"
+cd integration-tests
+# Keep the sandbox log inside the (gitignored) target dir so it survives a VM
+# restart on Windows hosts.
+cargo test --test sandbox -- --nocapture

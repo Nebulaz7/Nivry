@@ -44,17 +44,27 @@ use near_sdk::{
 /// `wallet_code_hash()` and must be recorded before any claim of immutability.
 pub const AGENT_WALLET_WASM: &[u8] = include_bytes!("../res/agent_wallet.wasm");
 
+/// SHA-256 of [`AGENT_WALLET_WASM`], lowercase hex, pinned by `build.rs`.
+///
+/// Computing this on chain cost more gas than a typical call is given, so it is
+/// computed once at build time from the same bytes the factory deploys.
+pub const WALLET_CODE_HASH_HEX: &str = env!("NIVRY_WALLET_CODE_HASH");
+
 /// NEP-171 requires a 1 yoctoNEAR security deposit on transfer calls.
 pub const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 pub const ZERO_YOCTO: NearToken = NearToken::from_yoctonear(0);
 
 /// Native balance handed to a freshly created treasury.
-pub const WALLET_INITIAL_BALANCE: NearToken = NearToken::from_millinear(50);
+///
+/// This is a storage stake, not a gift: NEAR requires the account to cover its own
+/// deployed code, and the treasury WASM is ~274 KB (~2.74 NEAR at 1e19 yocto per
+/// byte). The remainder is the operating reserve the wallet keeps unspendable.
+pub const WALLET_INITIAL_BALANCE: NearToken = NearToken::from_near(3);
 
 /// Retained by the registry to pay for the agent record's own storage.
 pub const REGISTRY_STORAGE_ALLOWANCE_YOCTO: u128 = 30_000_000_000_000_000_000_000;
 
-pub const CREATE_AGENT_GAS: Gas = Gas::from_tgas(60);
+pub const CREATE_AGENT_GAS: Gas = Gas::from_tgas(100);
 pub const DISPATCH_GAS: Gas = Gas::from_tgas(40);
 pub const SETTLE_GAS: Gas = Gas::from_tgas(25);
 /// Gas for the fixed `operation_status` query used to prove an unreadable outcome.
@@ -64,7 +74,7 @@ pub const RECEIVER_GAS: Gas = Gas::from_tgas(25);
 /// Minimum gas a caller must attach to `nft_transfer_call`: the receiver call, the
 /// resolver, and the receipts around them. Below this the resolver can starve and
 /// leave the agent locked with no outcome.
-pub const MIN_TRANSFER_CALL_GAS: Gas = Gas::from_tgas(60);
+pub const MIN_TRANSFER_CALL_GAS: Gas = Gas::from_tgas(100);
 /// Gas for the fixed `treasury_info` query used by provisioning recovery.
 pub const PROVISIONING_STATUS_GAS: Gas = Gas::from_tgas(20);
 
@@ -176,7 +186,8 @@ pub struct Registry {
     total_seller_credits_yocto: u128,
     /// Monotonic reservation counter. Never recycled.
     next_token_id: u64,
-    wallet_code_hash: Vec<u8>,
+    /// Lowercase hex, pinned at build time. Not derived on chain.
+    wallet_code_hash: String,
 }
 
 impl Default for Registry {
@@ -208,7 +219,7 @@ impl Default for Registry {
             seller_credits: LookupMap::new(StorageKey::SellerCredits),
             total_seller_credits_yocto: 0,
             next_token_id: 1,
-            wallet_code_hash: Vec::new(),
+            wallet_code_hash: String::new(),
         }
     }
 }
@@ -225,7 +236,7 @@ impl Registry {
 
         let mut this = Self::default();
         this.tokens.owner_id = owner_id;
-        this.wallet_code_hash = env::sha256(AGENT_WALLET_WASM).to_vec();
+        this.wallet_code_hash = WALLET_CODE_HASH_HEX.to_owned();
         this
     }
 
@@ -1306,7 +1317,7 @@ impl Registry {
         );
         require!(
             env::prepaid_gas() >= MIN_TRANSFER_CALL_GAS,
-            "attach at least 60 TGas for nft_transfer_call"
+            "attach at least 100 TGas for nft_transfer_call"
         );
 
         let mut agent = self.load_agent(&token_id);
@@ -1492,7 +1503,7 @@ impl Registry {
     /// Publishing this is not the same as verifying it against deployed bytecode,
     /// and neither is proof of immutability.
     pub fn wallet_code_hash(&self) -> String {
-        manifest::to_hex(&self.wallet_code_hash)
+        self.wallet_code_hash.clone()
     }
 
     pub fn agent_wallet_wasm_len(&self) -> u64 {
@@ -2591,7 +2602,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "attach at least 60 TGas")]
+    #[should_panic(expected = "attach at least 100 TGas")]
     fn a_transfer_call_requires_enough_gas() {
         let mut registry = authorized();
         testing_env!(env_as(OWNER)

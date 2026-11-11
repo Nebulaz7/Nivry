@@ -7,8 +7,8 @@ the chain, not copied from a local build log.
 - **Network:** `testnet`
 - **Recorded:** 2026-11-11
 - **Mainnet:** never deployed.
-- **Commit:** not yet recorded — the version/lock changes were still uncommitted
-  when this deployment was made. Update this line once they are.
+- **Commit:** `b083020013b0c7343da0a14249f420a5841c9083` (`b083020`).
+- **Repository:** https://github.com/Nebulaz7/Nivry
 
 ## Accounts
 

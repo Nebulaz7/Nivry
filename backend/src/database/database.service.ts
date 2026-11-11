@@ -74,6 +74,16 @@ export interface StoredTaskRow {
   created_at: string;
 }
 
+export interface StoredSessionChallengeRow {
+  challenge_id: string;
+  account_id: string;
+  nonce: string;
+  message: string;
+  expires_at: string;
+  used: boolean;
+  created_at: string;
+}
+
 const DEFAULT_DATABASE_URL =
   'postgres://nivry:nivry_dev_password@127.0.0.1:5432/nivry';
 
@@ -98,6 +108,7 @@ export class DatabaseService implements OnModuleDestroy {
   >();
   private readonly memTasks = new Map<string, StoredTaskRow>();
   private readonly memCursors = new Map<string, number>();
+  private readonly memChallenges = new Map<string, StoredSessionChallengeRow>();
   private nextEventId = 1;
 
   constructor() {
@@ -160,12 +171,13 @@ export class DatabaseService implements OnModuleDestroy {
       this.memOperations.clear();
       this.memTasks.clear();
       this.memCursors.clear();
+      this.memChallenges.clear();
       this.nextEventId = 1;
       return;
     }
     await this.ensureSchema();
     await this.pool.query(
-      'TRUNCATE agents, events, operation_projections, tasks, ingestion_cursors RESTART IDENTITY',
+      'TRUNCATE agents, events, operation_projections, tasks, ingestion_cursors, session_challenges RESTART IDENTITY',
     );
   }
 
@@ -666,6 +678,88 @@ export class DatabaseService implements OnModuleDestroy {
     return rows[0] ? Number(rows[0].last_processed_block_height) : 0;
   }
 
+  // ---- session challenges -----------------------------------------------
+
+  async createSessionChallenge(input: {
+    challenge_id: string;
+    account_id: string;
+    nonce: string;
+    message: string;
+    expires_at: Date;
+  }): Promise<StoredSessionChallengeRow> {
+    if (!this.pool) {
+      const row: StoredSessionChallengeRow = {
+        challenge_id: input.challenge_id,
+        account_id: input.account_id,
+        nonce: input.nonce,
+        message: input.message,
+        expires_at: input.expires_at.toISOString(),
+        used: false,
+        created_at: new Date().toISOString(),
+      };
+      this.memChallenges.set(input.challenge_id, row);
+      return row;
+    }
+
+    const { rows } = await this.pool.query<Row>(
+      `INSERT INTO session_challenges (challenge_id, account_id, nonce, message, expires_at, used)
+       VALUES ($1,$2,$3,$4,$5,FALSE)
+       RETURNING *`,
+      [
+        input.challenge_id,
+        input.account_id,
+        input.nonce,
+        input.message,
+        input.expires_at.toISOString(),
+      ],
+    );
+    return this.toSessionChallenge(rows[0]);
+  }
+
+  async getSessionChallenge(
+    challengeId: string,
+  ): Promise<StoredSessionChallengeRow | null> {
+    if (!this.pool) {
+      return this.memChallenges.get(challengeId) || null;
+    }
+    const { rows } = await this.pool.query<Row>(
+      'SELECT * FROM session_challenges WHERE challenge_id = $1',
+      [challengeId],
+    );
+    return rows[0] ? this.toSessionChallenge(rows[0]) : null;
+  }
+
+  /**
+   * Atomically marks a challenge as used if and only if it exists, is unused, and has not expired.
+   */
+  async consumeSessionChallenge(
+    challengeId: string,
+    now: Date = new Date(),
+  ): Promise<StoredSessionChallengeRow | null> {
+    if (!this.pool) {
+      const existing = this.memChallenges.get(challengeId);
+      if (!existing || existing.used) {
+        return null;
+      }
+      if (new Date(existing.expires_at).getTime() <= now.getTime()) {
+        return null;
+      }
+      existing.used = true;
+      return existing;
+    }
+
+    const { rows } = await this.pool.query<Row>(
+      `UPDATE session_challenges
+       SET used = TRUE
+       WHERE challenge_id = $1
+         AND used = FALSE
+         AND expires_at > $2
+       RETURNING *`,
+      [challengeId, now.toISOString()],
+    );
+    return rows[0] ? this.toSessionChallenge(rows[0]) : null;
+  }
+
   // ---- row mappers (pg returns BIGINT/NUMERIC as strings and TIMESTAMPTZ as Date) ----
 
   private toAgent(r: Row): StoredAgentRow {
@@ -729,6 +823,18 @@ export class DatabaseService implements OnModuleDestroy {
       error_message: (r.error_message as string | null) ?? null,
       started_at: isoOrNull(r.started_at),
       completed_at: isoOrNull(r.completed_at),
+      created_at: iso(r.created_at),
+    };
+  }
+
+  private toSessionChallenge(r: Row): StoredSessionChallengeRow {
+    return {
+      challenge_id: r.challenge_id as string,
+      account_id: r.account_id as string,
+      nonce: r.nonce as string,
+      message: r.message as string,
+      expires_at: iso(r.expires_at),
+      used: Boolean(r.used),
       created_at: iso(r.created_at),
     };
   }

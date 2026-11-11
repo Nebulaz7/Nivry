@@ -89,10 +89,10 @@ Our backend runs outside the blockchain. It cannot guess on-chain state, and it 
    The backend connects to NEAR through standard HTTP POST queries to public RPC nodes (`https://rpc.testnet.near.org`). It requests account data and executes view calls using standard JSON payloads.
 
 2. **Agent State and Governance Verification (`getAgentInfo`):**
-   The service calls the Registry contract (`registry.nivry.testnet`). It retrieves the true owner, active operator grants, and authority counter (`authority_epoch`). When a user signs a request, the backend verifies their signature and confirms that their identity matches `owner_id`.
+   The service calls the Registry contract (`nivry.testnet`). It retrieves the true owner, active operator grants, and authority counter (`authority_epoch`). When a user signs a request, the backend verifies their signature and confirms that their identity matches `owner_id`.
 
-3. **Keyless Treasury Verification (`verifyAccountLockState`):**
-   A buyer needs mathematical proof that the agent creator cannot secretly drain the treasury. The service calls `view_access_key_list`. If the list is empty (`keys: []`), the account has zero access keys. Nobody holds a private key to that account. Only the deployed smart contract code can move funds.
+3. **Keyless Treasury & Code Hash Verification (`verifyAccountLockState`):**
+   A buyer needs mathematical proof that the agent creator cannot secretly drain the treasury. The service calls `view_access_key_list`. If the list is empty (`keys: []`), the account has zero access keys. Furthermore, it verifies that the treasury child account's deployed bytecode hash (`code_hash`) matches the registry's `wallet_code_hash()` view. Only when both zero access keys and matching immutable code are proven does it certify `locked_release`. Nobody holds a private key to that account, and only the verified smart contract code can move funds.
 
 4. **Authority Epochs and Clean Transfers:**
    When an agent NFT transfers from Bob to Alice on the Registry contract:
@@ -251,3 +251,124 @@ When a client hires the agent to execute a task, the Tasks Module (`TaskRunnerSe
 - `POST /tasks`: Submits and runs a task for a specified agent token.
 - `GET /tasks/:taskId`: Returns the current status (`pending`, `running`, `completed`, `failed`, or `cancelled`) and result output.
 - `POST /tasks/:taskId/cancel`: Cancels an active task.
+
+---
+
+## 6. Executor Module
+
+### What the Executor Module Does
+
+The Executor Module (`ExecutorService` in `backend/src/executor/executor.service.ts`) executes bounded on-chain payments from an agent's keyless treasury.
+
+When an AI agent runs a job that incurs third-party costs or requires paying a vendor, the agent's operator dispatches payments. Rather than giving the AI agent arbitrary access to funds, the owner installs a bounded grant on the smart contract (`set_executor`). The Executor service validates all on-chain preconditions fail-closed and submits `execute_payment` to the registry contract using a local key signer.
+
+```
+          [ Payment Request ]
+                   │
+                   ▼
+       ┌────────────────────────┐
+       │     ExecutorService    │
+       └───────────┬────────────┘
+                   │
+       1. Precondition checks:
+          - Agent ready, not frozen, no pending operation
+          - Not listed, no unresolved transfer call
+          - Expected owner and authority epoch match
+          - Recipient allowlisted & per-payment cap respected
+          - Remaining budget >= requested amount
+                   │
+                   ▼
+       ┌────────────────────────┐
+       │   near-key-signer.ts   │  Signs execute_payment with EXECUTOR_PRIVATE_KEY
+       └───────────┬────────────┘
+                   │
+                   ▼
+       ┌────────────────────────┐
+       │  nivry.testnet (NEAR)  │  Smart contract validates on-chain and transfers
+       └───────────┬────────────┘
+                   │
+                   ▼
+       ┌────────────────────────┐
+       │ EventProjectionService │  Ingests finalized receipts into Agent Passport
+       └────────────────────────┘
+```
+
+### Key Responsibilities and How It Works
+
+1. **Fail-Closed Grant Precondition Checks:**
+   Before broadcasting any transaction to NEAR, the service verifies that:
+   - The token lifecycle is `ready`, `frozen` is false, and `pending_operation` is null.
+   - The token is not listed for sale and has no unresolved `nft_transfer_call`.
+   - The active grant's `executor_id` matches the configured executor account.
+   - `authority_epoch` and `owner_at_grant` match the live on-chain owner.
+   - The recipient is in `recipients`, and the amount does not exceed `per_payment_cap_yocto` or `remaining_budget_yocto`.
+
+2. **Local Key Signer (`near-key-signer.ts`):**
+   When `EXECUTOR_PRIVATE_KEY` is configured, payments are signed directly using `near-api-js` 7.5.3 and submitted to `execute_payment` on `nivry.testnet` with 150 TGas, waiting for final block inclusion (`waitUntil: 'FINAL'`).
+
+3. **Instant Passport Re-projection:**
+   Once the transaction finalizes on-chain, the executor calls `EventProjectionService.ingestTransactionFromChain` to parse NEP-297 events and update the local database projection immediately.
+
+### API Endpoints (`ExecutorController`)
+
+- `GET /executor/status`: Returns current mode (`local_key_signer`), executor account, and registry contract ID.
+- `POST /executor/payments`: Dispatches a bounded treasury payment, returning transaction hash, contract arguments, and ingested events.
+
+---
+
+## 7. Session Module (Wallet Authentication)
+
+### What the Session Module Does
+
+The Session Module (`SessionService` in `backend/src/session/session.service.ts`) provides non-custodial, cryptographic challenge-response authentication for wallet owners and authorized executors.
+
+The backend does not store wallet private keys. Instead, clients prove control of their NEAR account by signing an expiring cryptographic challenge. The backend validates the signature, verifies on-chain that the public key is an authorized access key, and issues an HMAC-signed bearer session token.
+
+```
+       [ Client Wallet ]                             [ Nivry Backend ]
+               │                                             │
+               │ 1. POST /auth/challenge { account_id }      │
+               │────────────────────────────────────────────>│
+               │                                             │ Generates nonce & challenge
+               │ 2. Returns challenge_id, nonce, message     │ Stores in session_challenges
+               │<────────────────────────────────────────────│
+               │                                             │
+      Signs with NEAR private key                            │
+      (NEP-413 or raw message)                               │
+               │                                             │
+               │ 3. POST /auth/verify { sig, public_key }    │
+               │────────────────────────────────────────────>│
+               │                                             │ Verifies Ed25519 signature
+               │                                             │ Checks NEAR RPC for access key
+               │                                             │ Atomically consumes challenge
+               │ 4. Returns session_token (Bearer)           │ Issues signed session token
+               │<────────────────────────────────────────────│
+               │                                             │
+               │ 5. POST /tasks (with Bearer token)          │
+               │────────────────────────────────────────────>│
+                                                             │ Checks on-chain owner_id or
+                                                             │ active executor grant for epoch
+```
+
+### Key Responsibilities and How It Works
+
+1. **One-Use Expiring Challenges (`session_challenges` table):**
+   `POST /auth/challenge` generates a unique challenge message containing a 32-byte hexadecimal nonce, target contract recipient (`nivry.testnet`), and timestamp. Challenges expire after 5 minutes and can only be consumed once.
+
+2. **Dual-Format Ed25519 Verification:**
+   `POST /auth/verify` parses the `ed25519:<base58>` public key and signature. It verifies the signature against either standard NEP-413 Borsh-serialized payloads or raw UTF-8 challenge messages using Node's native `node:crypto`.
+
+3. **On-Chain Access Key Proof:**
+   Possessing an Ed25519 private key is not enough—the public key must be installed on the NEAR account on-chain. `verifyAccountAccessKey` queries `view_access_key_list` and verifies the key has `FullAccess` or a `FunctionCall` permission targeting `nivry.testnet`.
+
+4. **On-Chain Role-Based Authorization Guard (`SessionAuthGuard`):**
+   Protected routes inspect the bearer token and invoke `assertAgentOwnerOrExecutor()`. The backend queries finalized `agent_info` on-chain:
+   - For owner-only operations (e.g. updating bundles), caller must match `owner_id`.
+   - For operational tasks (running tasks, canceling tasks, ingesting transactions), caller may match either `owner_id` or the active `executor_grant.executor_id` for the current `authority_epoch`.
+   - As soon as the agent NFT transfers to a new owner, previous owners and their operators are instantly rejected on the very next call.
+
+### API Endpoints (`SessionController`)
+
+- `POST /auth/challenge`: Generates a single-use expiring challenge for a NEAR account.
+- `POST /auth/verify`: Verifies the Ed25519 signature, checks on-chain key status, and returns a bearer session token.
+

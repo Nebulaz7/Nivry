@@ -81,7 +81,10 @@ describe('ChainReaderService', () => {
     ).toBe('{"token_id":"1"}');
   });
 
-  it('verifies keyless locked account state vs development/unverified state', async () => {
+  it('verifies keyless locked account state and treasury wallet_code_hash attestation vs development/unverified state', async () => {
+    const pinnedHexHash =
+      'ce3b675e2b3d9ab5a11d8840f0e1cd48471438f6a418ddc3bafce21fca4d8e5e';
+    let mockAccountCodeHash = pinnedHexHash;
     let mockKeys: unknown[] = [];
 
     global.fetch = jest
@@ -89,7 +92,9 @@ describe('ChainReaderService', () => {
       .mockImplementation((_url: unknown, init?: RequestInit) => {
         const body = JSON.parse(
           typeof init?.body === 'string' ? init.body : '{}',
-        ) as { params?: { request_type?: string } };
+        ) as {
+          params?: { request_type?: string; method_name?: string };
+        };
         if (body.params?.request_type === 'view_account') {
           return Promise.resolve({
             ok: true,
@@ -99,7 +104,27 @@ describe('ChainReaderService', () => {
                 result: {
                   amount: '50000000000000000000000',
                   storage_usage: 280000,
-                  code_hash: '99999999999999999999999999999999',
+                  code_hash: mockAccountCodeHash,
+                },
+              }),
+          });
+        }
+        if (
+          body.params?.request_type === 'call_function' &&
+          body.params?.method_name === 'wallet_code_hash'
+        ) {
+          const encoded = Array.from(
+            Buffer.from(JSON.stringify(pinnedHexHash), 'utf8'),
+          );
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                result: {
+                  result: encoded,
+                  block_height: 100,
+                  block_hash: 'blockhash1',
                 },
               }),
           });
@@ -118,8 +143,21 @@ describe('ChainReaderService', () => {
       '00000001.registry.nivry.testnet',
     );
     expect(locked.is_keyless).toBe(true);
+    expect(locked.code_hash_matches).toBe(true);
+    expect(locked.expected_code_hash).toBe(pinnedHexHash);
     expect(locked.verification_label).toBe('locked_release');
 
+    // Mismatched code hash on a keyless treasury must fail closed to 'development/unverified'
+    mockAccountCodeHash =
+      'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
+    const wrongCode = await service.verifyAccountLockState(
+      '00000001.registry.nivry.testnet',
+    );
+    expect(wrongCode.is_keyless).toBe(true);
+    expect(wrongCode.code_hash_matches).toBe(false);
+    expect(wrongCode.verification_label).toBe('development/unverified');
+
+    mockAccountCodeHash = pinnedHexHash;
     mockKeys = [
       { public_key: 'ed25519:abc', access_key: { permission: 'FullAccess' } },
     ];

@@ -102,9 +102,89 @@ export interface AccountLockVerification {
   amount_yocto: string;
   storage_usage: number;
   code_hash: string;
+  expected_code_hash?: string | null;
+  code_hash_matches?: boolean;
   key_count: number;
   is_keyless: boolean;
   verification_label: 'locked_release' | 'development/unverified';
+}
+
+export interface AccessKeyEntry {
+  public_key: string;
+  access_key: {
+    nonce: number;
+    permission:
+      | 'FullAccess'
+      | {
+          FunctionCall: {
+            allowance: string | null;
+            receiver_id: string;
+            method_names: string[];
+          };
+        };
+  };
+}
+
+const BASE58_ALPHABET =
+  '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+/**
+ * Decodes a Base58 string into raw bytes, or returns null if invalid.
+ */
+export function decodeBase58(input: string): Buffer | null {
+  if (!input || typeof input !== 'string') return null;
+  let num = 0n;
+  for (const ch of input) {
+    const idx = BASE58_ALPHABET.indexOf(ch);
+    if (idx === -1) return null;
+    num = num * 58n + BigInt(idx);
+  }
+  let hex = num === 0n ? '' : num.toString(16);
+  if (hex.length % 2 !== 0) hex = '0' + hex;
+  const trailingBytes = hex ? Buffer.from(hex, 'hex') : Buffer.alloc(0);
+
+  let leadingZeros = 0;
+  for (const ch of input) {
+    if (ch === '1') leadingZeros++;
+    else break;
+  }
+  return Buffer.concat([Buffer.alloc(leadingZeros), trailingBytes]);
+}
+
+/**
+ * Normalizes a 32-byte SHA-256 code hash from either 64-char hex or NEAR RPC Base58 into lowercase hex.
+ */
+export function normalizeCodeHashToHex(codeHash: string): string | null {
+  if (
+    !codeHash ||
+    typeof codeHash !== 'string' ||
+    codeHash === '11111111111111111111111111111111'
+  ) {
+    return null;
+  }
+  if (/^[0-9a-fA-F]{64}$/.test(codeHash)) {
+    return codeHash.toLowerCase();
+  }
+  const decoded = decodeBase58(codeHash);
+  if (!decoded || decoded.length !== 32 || decoded.every((b) => b === 0)) {
+    return null;
+  }
+  return decoded.toString('hex').toLowerCase();
+}
+
+export function codeHashesMatch(
+  actualCodeHash: string,
+  expectedCodeHash: string,
+): boolean {
+  if (!actualCodeHash || !expectedCodeHash) return false;
+  if (actualCodeHash.toLowerCase() === expectedCodeHash.toLowerCase()) {
+    return true;
+  }
+  const actualHex = normalizeCodeHashToHex(actualCodeHash);
+  const expectedHex = normalizeCodeHashToHex(expectedCodeHash);
+  return (
+    actualHex !== null && expectedHex !== null && actualHex === expectedHex
+  );
 }
 
 export interface ParsedNep297Event {
@@ -204,13 +284,58 @@ export class ChainReaderService {
   }
 
   /**
+   * Queries finalized access keys for an account (`view_access_key_list`).
+   */
+  async getAccessKeyList(accountId: string): Promise<AccessKeyEntry[]> {
+    const keysRes = await this.rpcRequest<{
+      keys: AccessKeyEntry[];
+    }>('query', {
+      request_type: 'view_access_key_list',
+      finality: 'final',
+      account_id: accountId,
+    });
+    return Array.isArray(keysRes?.keys) ? keysRes.keys : [];
+  }
+
+  /**
+   * Verifies that `publicKey` is currently installed on `accountId` on-chain with either
+   * `FullAccess` or a `FunctionCall` permission targeting the Nivry registry contract (PLAN.md §13).
+   */
+  async verifyAccountAccessKey(
+    accountId: string,
+    publicKey: string,
+  ): Promise<boolean> {
+    const keys = await this.getAccessKeyList(accountId);
+    const match = keys.find((k) => k.public_key === publicKey);
+    if (!match || !match.access_key) {
+      return false;
+    }
+    const perm = match.access_key.permission;
+    if (perm === 'FullAccess') {
+      return true;
+    }
+    if (
+      typeof perm === 'object' &&
+      perm !== null &&
+      'FunctionCall' in perm &&
+      perm.FunctionCall?.receiver_id === this.registryContractId
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Verifies whether an on-chain account has zero access keys and deployed code (PLAN.md §6).
-   * Always returns 'development/unverified' unless keys list is empty and code is present.
+   * For treasury child accounts, also requires `accountRes.code_hash` to match the Registry
+   * contract's `wallet_code_hash()` view (`ISSUES.md` #2).
+   * Always returns 'development/unverified' unless keys list is empty and expected code is present.
    */
   async verifyAccountLockState(
     accountId: string,
   ): Promise<AccountLockVerification> {
-    const [accountRes, keysRes] = await Promise.all([
+    const isRegistryAccount = accountId === this.registryContractId;
+    const [accountRes, keysRes, expectedWalletCodeHash] = await Promise.all([
       this.rpcRequest<{
         amount: string;
         storage_usage: number;
@@ -227,6 +352,7 @@ export class ChainReaderService {
         finality: 'final',
         account_id: accountId,
       }),
+      isRegistryAccount ? Promise.resolve(null) : this.getWalletCodeHash(),
     ]);
 
     const keyCount = Array.isArray(keysRes.keys) ? keysRes.keys.length : 0;
@@ -234,16 +360,23 @@ export class ChainReaderService {
       typeof accountRes.code_hash === 'string' &&
       accountRes.code_hash !== '11111111111111111111111111111111';
     const isKeyless = keyCount === 0;
+    const codeHashMatches = isRegistryAccount
+      ? hasContractCode
+      : hasContractCode &&
+        typeof expectedWalletCodeHash === 'string' &&
+        codeHashesMatch(accountRes.code_hash, expectedWalletCodeHash);
 
     return {
       account_id: accountId,
       amount_yocto: accountRes.amount,
       storage_usage: accountRes.storage_usage,
       code_hash: accountRes.code_hash,
+      expected_code_hash: expectedWalletCodeHash,
+      code_hash_matches: codeHashMatches,
       key_count: keyCount,
       is_keyless: isKeyless,
       verification_label:
-        isKeyless && hasContractCode
+        isKeyless && hasContractCode && codeHashMatches
           ? 'locked_release'
           : 'development/unverified',
     };

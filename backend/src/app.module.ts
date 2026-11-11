@@ -7,9 +7,11 @@ import { DatabaseModule } from './database/database.module';
 import { PassportModule } from './passport/passport.module';
 import { TasksModule } from './tasks/tasks.module';
 import { ExecutorModule } from './executor/executor.module';
+import { SessionModule } from './session/session.module';
 
 @Module({
   imports: [
+    SessionModule,
     BundleModule,
     VerifierModule,
     DatabaseModule,

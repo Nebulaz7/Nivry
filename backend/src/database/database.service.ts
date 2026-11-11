@@ -128,7 +128,7 @@ export class DatabaseService implements OnModuleDestroy {
         )
         .then(() => undefined);
     }
-    return this.schemaReadyPromise;
+    return this.schemaReadyPromise ?? Promise.resolve();
   }
 
   async onModuleDestroy(): Promise<void> {

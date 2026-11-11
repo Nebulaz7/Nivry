@@ -48,4 +48,3 @@ export class ExecutePaymentRequestDto {
   })
   deadline_ns?: string;
 }
-

@@ -26,6 +26,7 @@ describe('ExecutorService', () => {
       owner_id: 'seller.testnet',
       treasury_account_id: treasuryId,
       authority_epoch: 1,
+      version: 1,
       ownership_change_count: 0,
       lifecycle: 'ready',
       frozen: false,
@@ -42,6 +43,8 @@ describe('ExecutorService', () => {
       },
       next_command_nonce: 1,
       pending_operation: null,
+      pending_transfer_call: null,
+      listing: null,
       manifest: {
         schema_version: '1',
         name: 'Docs Reporter',

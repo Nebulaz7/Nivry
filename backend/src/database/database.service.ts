@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   OnModuleDestroy,
 } from '@nestjs/common';
@@ -175,6 +176,13 @@ export class DatabaseService implements OnModuleDestroy {
    * stored one is ignored so a stale read can never roll ownership back.
    */
   async upsertAgent(info: AgentInfoView): Promise<StoredAgentRow> {
+    const ownerId = info.owner_id;
+    if (ownerId === null) {
+      // The contract reports no owner until provisioning confirms and the NFT is minted.
+      throw new ConflictException(
+        `Agent ${info.token_id} has no owner yet (lifecycle: ${info.lifecycle})`,
+      );
+    }
     if (!this.pool) {
       const existing = this.memAgents.get(info.token_id);
       if (existing && existing.authority_epoch > info.authority_epoch) {
@@ -182,7 +190,7 @@ export class DatabaseService implements OnModuleDestroy {
       }
       const row: StoredAgentRow = {
         token_id: info.token_id,
-        owner_id: info.owner_id,
+        owner_id: ownerId,
         treasury_account_id: info.treasury_account_id,
         authority_epoch: info.authority_epoch,
         ownership_change_count: info.ownership_change_count,
@@ -214,7 +222,7 @@ export class DatabaseService implements OnModuleDestroy {
        RETURNING *`,
       [
         info.token_id,
-        info.owner_id,
+        ownerId,
         info.treasury_account_id,
         info.authority_epoch,
         info.ownership_change_count,

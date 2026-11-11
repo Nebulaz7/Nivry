@@ -14,6 +14,7 @@ import type {
   ExecutorStatusView,
   PaymentExecutionOutcome,
 } from './executor.types';
+import { createNearKeyDispatcher } from './near-key-signer';
 
 const DEFAULT_DEADLINE_WINDOW_NS = 5n * 60n * 1_000_000_000n;
 
@@ -35,6 +36,15 @@ export class ExecutorService {
   ) {
     this.executorAccountId =
       process.env.EXECUTOR_ACCOUNT_ID || 'executor.nivry.testnet';
+
+    const privateKey = process.env.EXECUTOR_PRIVATE_KEY;
+    if (privateKey) {
+      this.customDispatcher = createNearKeyDispatcher({
+        executorAccountId: this.executorAccountId,
+        privateKey,
+        rpcUrl: process.env.NEAR_RPC_URL || 'https://rpc.testnet.near.org',
+      });
+    }
   }
 
   /**
@@ -78,13 +88,14 @@ export class ExecutorService {
     }
 
     const agent = await this.chainReader.getAgentInfo(request.token_id);
-    await this.db.upsertAgent(agent);
 
-    if (agent.lifecycle !== 'ready') {
+    if (agent.lifecycle !== 'ready' || agent.owner_id === null) {
       throw new ConflictException(
         `Agent ${agent.token_id} is not ready (current lifecycle: ${agent.lifecycle})`,
       );
     }
+    const ownerId = agent.owner_id;
+    await this.db.upsertAgent(agent);
     if (agent.frozen) {
       throw new ForbiddenException(
         `Agent ${agent.token_id} is frozen by owner`,
@@ -96,12 +107,23 @@ export class ExecutorService {
       );
     }
 
+    if (agent.pending_transfer_call !== null) {
+      throw new ConflictException(
+        `Agent ${agent.token_id} has an unresolved nft_transfer_call (${agent.pending_transfer_call.operation_id})`,
+      );
+    }
+    if (agent.listing !== null) {
+      throw new ConflictException(
+        `Agent ${agent.token_id} is listed for sale; outgoing payments are blocked`,
+      );
+    }
+
     if (
       request.expected_owner !== undefined &&
-      request.expected_owner !== agent.owner_id
+      request.expected_owner !== ownerId
     ) {
       throw new ForbiddenException(
-        `expected_owner "${request.expected_owner}" does not match current on-chain owner "${agent.owner_id}"`,
+        `expected_owner "${request.expected_owner}" does not match current on-chain owner "${ownerId}"`,
       );
     }
 
@@ -142,9 +164,9 @@ export class ExecutorService {
       );
     }
 
-    if (grant.owner_at_grant !== agent.owner_id) {
+    if (grant.owner_at_grant !== ownerId) {
       throw new ForbiddenException(
-        `Grant owner (${grant.owner_at_grant}) does not match current owner (${agent.owner_id})`,
+        `Grant owner (${grant.owner_at_grant}) does not match current owner (${ownerId})`,
       );
     }
 
@@ -185,7 +207,7 @@ export class ExecutorService {
 
     const contractArgs: ExecutePaymentContractArgs = {
       token_id: agent.token_id,
-      expected_owner: agent.owner_id,
+      expected_owner: ownerId,
       authority_epoch: agent.authority_epoch,
       nonce: agent.next_command_nonce,
       recipient: request.recipient,

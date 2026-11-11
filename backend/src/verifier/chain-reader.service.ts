@@ -27,6 +27,7 @@ export interface GrantView {
   total_budget_yocto: string;
   spent_yocto: string;
   remaining_budget_yocto: string;
+  /** Raw `u64` in the contract's JSON; decimal nanoseconds. */
   expires_at_ns: number;
 }
 
@@ -39,17 +40,37 @@ export interface PendingOperationView {
   epoch: number;
 }
 
+export interface PendingTransferCallView {
+  operation_id: string;
+  receiver_id: string;
+  previous_owner: string;
+  epoch: number;
+}
+
+export interface ListingView {
+  listing_id: number;
+  seller: string;
+  version: number;
+  price_yocto: string;
+  manifest_hash: string;
+}
+
 export interface AgentInfoView {
   token_id: string;
-  owner_id: string;
+  /** `null` until provisioning confirms and the NFT is actually minted. */
+  owner_id: string | null;
   treasury_account_id: string;
   authority_epoch: number;
+  /** Buyer-visible state version (contract `AgentRecord::version`). */
+  version: number;
   ownership_change_count: number;
   lifecycle: Lifecycle;
   frozen: boolean;
   executor_grant: GrantView | null;
   next_command_nonce: number;
   pending_operation: PendingOperationView | null;
+  pending_transfer_call: PendingTransferCallView | null;
+  listing: ListingView | null;
   manifest: ManifestView;
   manifest_hash: string;
 }
@@ -114,7 +135,7 @@ export class ChainReaderService {
   constructor() {
     this.rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.testnet.near.org';
     this.registryContractId =
-      process.env.REGISTRY_CONTRACT_ID || 'registry.nivry.testnet';
+      process.env.REGISTRY_CONTRACT_ID || 'nivry.testnet';
   }
 
   getRegistryContractId(): string {

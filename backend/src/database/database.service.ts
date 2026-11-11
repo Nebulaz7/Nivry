@@ -36,11 +36,11 @@ export interface StoredEventRow {
   event_name: string;
   authority_epoch: number | null;
   category:
-  | 'service_payment'
-  | 'owner_deposit'
-  | 'outbound_payout'
-  | 'authority_transition'
-  | 'lifecycle';
+    | 'service_payment'
+    | 'owner_deposit'
+    | 'outbound_payout'
+    | 'authority_transition'
+    | 'lifecycle';
   data: Record<string, unknown>;
   created_at: string;
 }
@@ -128,7 +128,7 @@ export class DatabaseService implements OnModuleDestroy {
         )
         .then(() => undefined);
     }
-    return this.schemaReadyPromise;
+    return this.schemaReadyPromise ?? Promise.resolve();
   }
 
   async onModuleDestroy(): Promise<void> {

@@ -7,7 +7,7 @@ import {
   Post,
 } from '@nestjs/common';
 import { ExecutorService } from './executor.service';
-import type { ExecutePaymentRequestDto } from './executor.types';
+import { ExecutePaymentRequestDto } from './dto/execute-payment.dto';
 
 @Controller('executor')
 export class ExecutorController {

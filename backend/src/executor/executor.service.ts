@@ -11,13 +11,11 @@ import { ChainReaderService } from '../verifier/chain-reader.service';
 import type {
   ExecutePaymentContractArgs,
   ExecutePaymentRequestDto,
-  ExecutorMode,
   ExecutorStatusView,
   PaymentExecutionOutcome,
 } from './executor.types';
 
 const DEFAULT_DEADLINE_WINDOW_NS = 5n * 60n * 1_000_000_000n;
-const DEFAULT_EXECUTE_PAYMENT_GAS = '120000000000000';
 
 export type TransactionDispatchFn = (params: {
   registryContractId: string;
@@ -27,9 +25,6 @@ export type TransactionDispatchFn = (params: {
 
 @Injectable()
 export class ExecutorService {
-  private readonly outlayerApiUrl: string;
-  private readonly outlayerWalletId: string | null;
-  private readonly outlayerApiKey: string | null;
   private executorAccountId: string;
   private customDispatcher: TransactionDispatchFn | null = null;
 
@@ -38,17 +33,13 @@ export class ExecutorService {
     private readonly projectionService: EventProjectionService,
     private readonly db: DatabaseService,
   ) {
-    this.outlayerApiUrl =
-      process.env.OUTLAYER_API_URL || 'https://testnet-api.outlayer.ai';
-    this.outlayerWalletId = process.env.OUTLAYER_WALLET_ID || null;
-    this.outlayerApiKey = process.env.OUTLAYER_API_KEY || null;
     this.executorAccountId =
       process.env.EXECUTOR_ACCOUNT_ID || 'executor.nivry.testnet';
   }
 
   /**
-   * Allows tests or local testnet harness scripts to inject a custom signer/dispatcher
-   * and override the active executor account ID.
+   * Allows tests or testnet scripts to inject the transaction signer
+   * and configure the active executor account ID.
    */
   configureLocalDispatcher(
     executorAccountId: string,
@@ -59,16 +50,11 @@ export class ExecutorService {
   }
 
   getStatus(): ExecutorStatusView {
-    const mode = this.getActiveMode();
     return {
-      mode,
-      mode_label:
-        mode === 'outlayer_tee_custody'
-          ? 'OutLayer Custody Executor (Bounded by On-Chain Grant)'
-          : 'Local Key (Non-TEE)',
+      mode: 'local_key_signer',
+      mode_label: 'Local Key Signer (Testnet)',
       executor_account_id: this.executorAccountId,
       registry_contract_id: this.chainReader.getRegistryContractId(),
-      outlayer_configured: Boolean(this.outlayerWalletId),
     };
   }
 
@@ -233,10 +219,6 @@ export class ExecutorService {
     };
   }
 
-  private getActiveMode(): ExecutorMode {
-    return this.outlayerWalletId ? 'outlayer_tee_custody' : 'local_key_non_tee';
-  }
-
   private async dispatchExecutePayment(
     args: ExecutePaymentContractArgs,
   ): Promise<{ transaction_hash: string }> {
@@ -250,64 +232,8 @@ export class ExecutorService {
       });
     }
 
-    if (this.outlayerWalletId) {
-      return this.dispatchViaOutLayer(registryContractId, args);
-    }
-
     throw new BadGatewayException(
-      'No OutLayer wallet ID or local transaction signer configured for ExecutorService',
+      'No active local key transaction signer configured for ExecutorService',
     );
-  }
-
-  private async dispatchViaOutLayer(
-    registryContractId: string,
-    args: ExecutePaymentContractArgs,
-  ): Promise<{ transaction_hash: string }> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    if (this.outlayerApiKey) {
-      headers['Authorization'] = `Bearer ${this.outlayerApiKey}`;
-    }
-
-    let response: Response;
-    try {
-      response = await fetch(`${this.outlayerApiUrl}/wallet/v1/call`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          wallet_id: this.outlayerWalletId,
-          contract_id: registryContractId,
-          method_name: 'execute_payment',
-          args,
-          gas: DEFAULT_EXECUTE_PAYMENT_GAS,
-          deposit: '0',
-        }),
-        signal: AbortSignal.timeout(15000),
-      });
-    } catch (err) {
-      throw new BadGatewayException(
-        `OutLayer custody call failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-
-    if (!response.ok) {
-      throw new BadGatewayException(
-        `OutLayer custody API returned HTTP ${response.status}`,
-      );
-    }
-
-    const payload = (await response.json()) as {
-      transaction_hash?: string;
-      tx_hash?: string;
-    };
-    const txHash = payload.transaction_hash || payload.tx_hash;
-    if (!txHash || typeof txHash !== 'string') {
-      throw new BadGatewayException(
-        'OutLayer custody API did not return a transaction_hash',
-      );
-    }
-
-    return { transaction_hash: txHash };
   }
 }

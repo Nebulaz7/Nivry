@@ -133,8 +133,8 @@ describe('ExecutorService', () => {
     });
 
     expect(outcome.succeeded).toBe(true);
-    expect(outcome.mode).toBe('local_key_non_tee');
-    expect(outcome.mode_label).toBe('Local Key (Non-TEE)');
+    expect(outcome.mode).toBe('local_key_signer');
+    expect(outcome.mode_label).toBe('Local Key Signer (Testnet)');
     expect(outcome.contract_args.nonce).toBe(1);
     expect(outcome.contract_args.authority_epoch).toBe(1);
     expect(outcome.ingestion.inserted_events).toBe(2);

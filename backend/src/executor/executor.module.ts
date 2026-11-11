@@ -11,4 +11,3 @@ import { ExecutorService } from './executor.service';
   exports: [ExecutorService],
 })
 export class ExecutorModule {}
-

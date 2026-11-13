@@ -112,11 +112,16 @@ export function Faq() {
                     id={panelId}
                     role="region"
                     aria-labelledby={buttonId}
-                    hidden={!isOpen}
+                    inert={!isOpen}
+                    className={`grid transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none ${
+                      isOpen ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+                    }`}
                   >
-                    <p className="max-w-md pb-6 text-[14px] leading-relaxed text-mint/60">
-                      {item.answer}
-                    </p>
+                    <div className="overflow-hidden">
+                      <p className="max-w-md pb-6 text-[14px] leading-relaxed text-mint/60">
+                        {item.answer}
+                      </p>
+                    </div>
                   </div>
                 </div>
               );

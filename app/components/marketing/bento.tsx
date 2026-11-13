@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+
+import { TileVisual } from "./bento-visuals";
 
 type Tile = {
   index: string;
@@ -8,7 +10,6 @@ type Tile = {
   claim: string;
   proof: string;
   span: string;
-  emphasis?: boolean;
 };
 
 const TILES: Tile[] = [
@@ -16,15 +17,14 @@ const TILES: Tile[] = [
     index: "01",
     method: "create_agent()",
     claim: "The treasury has no keys.",
-    proof: "0 ACCESS KEYS",
+    proof: "ACCESS KEYS",
     span: "md:col-span-2 lg:col-span-3 lg:row-span-2",
-    emphasis: true,
   },
   {
     index: "02",
     method: "set_executor()",
     claim: "Spending is capped before it happens.",
-    proof: "cap · budget · \u226490d",
+    proof: "cap \u00b7 budget \u00b7 \u226490d",
     span: "lg:col-span-3",
   },
   {
@@ -38,14 +38,14 @@ const TILES: Tile[] = [
     index: "04",
     method: "wallet_code_hash()",
     claim: "You can check the code yourself.",
-    proof: "ce3b675e\u2026",
+    proof: "matches the deployed bytecode",
     span: "lg:col-span-2",
   },
   {
     index: "05",
     method: "expected_version",
     claim: "What you inspect is what you buy.",
-    proof: "version · manifest",
+    proof: "price \u00b7 version \u00b7 manifest",
     span: "lg:col-span-2",
   },
   {
@@ -58,38 +58,30 @@ const TILES: Tile[] = [
 ];
 
 /**
- * Six guarantees, each with the contract call or value that enforces it.
- * Tiles stagger in once, on first intersection.
+ * Six guarantees, each pairing a claim with the contract call that enforces it.
+ * The tiles reveal once, staggered, and their visuals arm at the same moment.
  */
 export function Bento() {
   const gridRef = useRef<HTMLDivElement>(null);
+  const [mounted, setMounted] = useState(false);
+  const [started, setStarted] = useState(false);
 
   useEffect(() => {
     const grid = gridRef.current;
     if (!grid) return;
 
-    const items = Array.from(grid.children) as HTMLElement[];
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    setMounted(true);
 
-    items.forEach((item) => {
-      item.style.opacity = reduced ? "1" : "0";
-      item.style.transform = reduced ? "none" : "translateY(14px)";
-      item.style.transition = "opacity 600ms ease-out, transform 600ms ease-out";
-    });
-
-    if (reduced) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setStarted(true);
+      return;
+    }
 
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
           if (!entry.isIntersecting) continue;
-
-          items.forEach((item, index) => {
-            item.style.transitionDelay = `${index * 55}ms`;
-            item.style.opacity = "1";
-            item.style.transform = "none";
-          });
-
+          setStarted(true);
           observer.disconnect();
         }
       },
@@ -102,10 +94,7 @@ export function Bento() {
   }, []);
 
   return (
-    <section
-      id="guarantees"
-      className="relative border-t border-mint/10 bg-void"
-    >
+    <section id="guarantees" className="relative border-t border-mint/10 bg-void">
       <div className="mx-auto max-w-6xl px-5 py-24 sm:px-8 sm:py-28">
         <p className="font-mono text-[11px] tracking-[0.2em] text-accent">
           || guarantees
@@ -119,38 +108,40 @@ export function Bento() {
           ref={gridRef}
           className="mt-14 grid gap-px border border-mint/12 bg-mint/12 md:grid-cols-2 lg:grid-cols-6"
         >
-          {TILES.map((tile) => (
-            <article
-              key={tile.index}
-              className={`group flex min-h-[184px] flex-col justify-between bg-void p-6 transition-colors duration-200 hover:bg-mint/[0.03] ${tile.span}`}
-            >
-              <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.18em] text-mint/30">
-                <span>{tile.index}</span>
-                <span className="normal-case tracking-[0.04em] text-mint/25">
-                  {tile.method}
-                </span>
-              </div>
+          {TILES.map((tile, index) => {
+            const waiting = mounted && !started;
 
-              {tile.emphasis ? (
-                <div className="my-8">
-                  <p className="font-mono text-[clamp(4.5rem,11vw,8rem)] leading-[0.8] text-accent">
-                    0
-                  </p>
-                  <p className="mt-4 font-mono text-[10px] tracking-[0.22em] text-mint/40">
-                    {tile.proof}
-                  </p>
+            return (
+              <article
+                key={tile.index}
+                style={{
+                  transitionDelay: started ? `${index * 55}ms` : "0ms",
+                }}
+                className={`flex min-h-[190px] flex-col bg-void p-6 transition-[opacity,transform] duration-700 ease-out ${
+                  tile.span
+                } ${waiting ? "translate-y-3 opacity-0" : "translate-y-0 opacity-100"}`}
+              >
+                <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.18em] text-mint/30">
+                  <span>{tile.index}</span>
+                  <span className="normal-case tracking-[0.04em] text-mint/25">
+                    {tile.method}
+                  </span>
                 </div>
-              ) : (
-                <p className="mt-8 font-mono text-[12px] tracking-[0.04em] text-accent">
+
+                <div className="mt-8">
+                  <TileVisual id={tile.index} started={started} />
+                </div>
+
+                <p className="mt-5 font-mono text-[11px] tracking-[0.04em] text-accent">
                   {tile.proof}
                 </p>
-              )}
 
-              <p className="mt-6 text-[15px] leading-snug text-mint">
-                {tile.claim}
-              </p>
-            </article>
-          ))}
+                <p className="mt-auto pt-6 text-[15px] leading-snug text-mint">
+                  {tile.claim}
+                </p>
+              </article>
+            );
+          })}
         </div>
       </div>
     </section>

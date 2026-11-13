@@ -89,6 +89,7 @@ export function Statement() {
     <section
       ref={sectionRef}
       id="how"
+      data-hide-nav
       className="relative border-t border-mint/10"
       style={{ backgroundColor: "#000000" }}
     >

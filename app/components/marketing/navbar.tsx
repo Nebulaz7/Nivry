@@ -26,13 +26,13 @@ export function Navbar() {
     let hidden = false;
 
     const sync = () => {
-      const section = document.getElementById("how");
+      const marks = document.querySelectorAll<HTMLElement>("[data-hide-nav]");
 
       let shouldHide = false;
-      if (section) {
-        const rect = section.getBoundingClientRect();
-        shouldHide = rect.top <= 0 && rect.bottom >= window.innerHeight;
-      }
+      marks.forEach((node) => {
+        const rect = node.getBoundingClientRect();
+        if (rect.top <= 0 && rect.bottom >= 0) shouldHide = true;
+      });
 
       if (shouldHide === hidden) return;
       hidden = shouldHide;

@@ -11,12 +11,14 @@
 
 html {
   background-color: var(--color-void);
+  overflow-x: clip;
 }
 
 body {
   background-color: var(--color-void);
   color: var(--color-mint);
   font-family: var(--font-sans);
+  overflow-x: clip;
   -webkit-font-smoothing: antialiased;
 }
 

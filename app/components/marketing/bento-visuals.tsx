@@ -200,15 +200,13 @@ function AtomicChecks({ started }: Started) {
 function SettleHalt({ started }: Started) {
   return (
     <div className="relative h-[2px] w-full bg-mint/15">
-      <div
-        className="absolute inset-0"
+      <span
+        className="absolute -top-[3px] h-2 w-2 rounded-full bg-accent"
         style={{
-          transform: started ? "translateX(66%)" : "translateX(0)",
-          transition: `transform 800ms ${EASE}`,
+          left: started ? "66%" : "0%",
+          transition: `left 800ms ${EASE}`,
         }}
-      >
-        <span className="absolute -top-[3px] left-0 h-2 w-2 rounded-full bg-accent" />
-      </div>
+      />
 
       <div
         className="absolute -top-[3px] left-[66%] h-2 w-px bg-mint/60"

@@ -16,21 +16,21 @@ type Row = {
 
 const ROWS: Row[] = [
   {
-    step: "01 / mint",
+    step: "01 | mint",
     title: "Mint the agent.",
     body: "One payable call creates the account, deploys the treasury and mints the title. The token id exists before the title does, so it shows as provisioning until the receipt lands.",
     detail: "3.03 NEAR · one receipt · no key actions",
     Visual: MintFlow,
   },
   {
-    step: "02 / operate",
+    step: "02 | operate",
     title: "Give it a budget.",
     body: "An executor spends inside a cap, an allowlist and an expiry. Revoking it bumps the authority epoch, so nothing outstanding survives the change.",
     detail: "cap · allowlist · expiry",
     Visual: GrantBudget,
   },
   {
-    step: "03 / sell",
+    step: "03 | sell",
     title: "Sell without a backdoor.",
     body: "The listing pins the version and the manifest hash. If either of them moved before the buyer signs, the purchase aborts instead of settling.",
     detail: "expected_version · expected_manifest_hash",

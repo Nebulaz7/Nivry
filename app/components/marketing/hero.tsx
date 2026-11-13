@@ -32,22 +32,19 @@ export function Hero() {
                 {SITE.headline}
               </h1>
 
-              <p className="mt-6 max-w-sm text-[15px] leading-relaxed text-mint/60">
+              <p className="mt-6 max-w-md text-[15px] leading-relaxed text-mint/65">
                 {SITE.subline}
               </p>
 
-              <div className="mt-9 flex items-center gap-3">
-                <Link
-                  href="/app"
-                  className="bg-accent px-6 py-3 text-[13px] font-medium text-void transition-colors duration-150 hover:bg-mint"
-                >
+              <div className="mt-9 flex flex-wrap items-center gap-3">
+                <Link href="/app" className="btn btn-primary">
                   Launch app
                 </Link>
                 <a
                   href={SITE.github}
                   target="_blank"
                   rel="noreferrer"
-                  className="border border-mint/20 px-6 py-3 text-[13px] text-mint transition-colors duration-150 hover:border-accent"
+                  className="btn btn-secondary"
                 >
                   Read the NEP
                 </a>

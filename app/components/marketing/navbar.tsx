@@ -38,10 +38,7 @@ export function Navbar() {
           ))}
         </div>
 
-        <Link
-          href="/app"
-          className="bg-accent px-4 py-2 text-[13px] font-medium text-void transition-colors duration-100 hover:bg-mint"
-        >
+        <Link href="/app" className="btn btn-primary btn-sm">
           Launch app
         </Link>
       </nav>

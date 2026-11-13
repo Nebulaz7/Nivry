@@ -5,24 +5,24 @@
  * Hand-authored on purpose: at this resolution generated noise reads as dirt,
  * while a fixed silhouette stays legible at any size.
  */
-const GRID = [
-  "................",
-  "...ffffffffff...",
-  "..ffffffffffff..",
-  ".fff.ffffff.fff.",
-  ".fff.ffffff.fff.",
-  ".ffffffffffffff.",
-  ".ffffffffffffff.",
-  ".ff.dd....dd.ff.",
-  ".ff.dd....dd.ff.",
-  ".ffffffffffffff.",
-  ".fffff.dd.fffff.",
-  ".fffff.dd.fffff.",
-  "..ffffffffffff..",
-  "...ffffffffff...",
-  "....ffffffff....",
-  "................",
-] as const;
+ const GRID = [
+   "................",
+   "....ffffffff....",
+   "...ffffffffff...",
+   "..ffffffffffff..",
+   "..ffffffffffff..",
+   ".ffffffffffffff.",
+   "ffff.dd..dd.ffff",
+   "ffff.dd..dd.ffff",
+   "ffffffffffffffff",
+   "..ffffffffffff..",
+   "..ffff.dd.ffff..",
+   "..ff.dddddd.ff..",
+   "..ffffffffffff..",
+   "...ffffffffff...",
+   "....ffffffff....",
+   "................",
+ ] as const;
 
 export const PFP_SIZE = 16;
 

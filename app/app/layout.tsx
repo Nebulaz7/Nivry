@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Nivry — NFTs that hold a wallet",
+  title: "Nivry | NFTs that hold a wallet",
   description:
     "A NEP-171 extension: the token is the title, the treasury is the asset.",
 };

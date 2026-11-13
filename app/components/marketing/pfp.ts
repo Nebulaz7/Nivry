@@ -11,17 +11,17 @@
    "...ffffffffff...",
    "..ffffffffffff..",
    "..ffffffffffff..",
-   ".ffffffffffffff.",
-   "ffff.dd..dd.ffff",
-   "ffff.dd..dd.ffff",
+   "..ffffffffffff..",
+   "ffffffffffffffff",
+   "ffffddffffddffff",
    "ffffffffffffffff",
    "..ffffffffffff..",
    "..ffff.dd.ffff..",
-   "..ff.dddddd.ff..",
+   "..fddddddddddf..",
    "..ffffffffffff..",
    "...ffffffffff...",
-   "....ffffffff....",
-   "................",
+   ".ffffffffffffff.",
+   "ffffffffffffffff",
  ] as const;
 
 export const PFP_SIZE = 16;

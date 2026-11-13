@@ -11,8 +11,10 @@ export const SITE = {
       "Today you can wrap that agent in an NFT.",
       "But the NFT moves. The wallet stays where it was.",
     ],
-    solution:
-      "Nivry makes the token the title. Identity, treasury and authority are owned by one token, and they move together in a single transaction \u2014 so the seller's access ends before the buyer's begins.",
+    solution: [
+      "Nivry makes the token the title.",
+      "Treasury and access move with it.",
+    ],
   },
   registry: "nivry.testnet",
   treasury: "00000001.nivry.testnet",

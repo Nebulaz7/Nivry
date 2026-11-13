@@ -7,7 +7,7 @@ export default function Home() {
   return (
     <>
       <Navbar />
-      <main>
+      <main className="overflow-y-hidden">
         <Hero />
         <Statement />
         <Bento />

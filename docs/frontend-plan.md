@@ -12,17 +12,16 @@ Scaffold: `app/` — Next **16.4.6**, React **19.3**, Tailwind **4.3** (Turbopac
 | 1 | Mint entry point | **Modal** on the dashboard. No `/app/mint` route. |
 | 2 | Marketplace discovery | **Enumerate token ids** via `next_token_id()` + batched `agent_info`. No indexer dependency. |
 | 3 | Wallet | **HOT connector UI** (one modal → any supported NEAR wallet, Privy-style). |
-| 4 | Hero morph | **AI-generated video**, scroll-scrubbed. |
+| 4 | Hero morph | **Code-generated canvas particle morph.** No AI assets, no video. |
 | 5 | Routing | **`/app`** path on one deployment. |
 | 6 | Shared types | **Single workspace** (see §11 for the migration and its one risk). |
 | 7 | Logo | **You** are designing the mark and wordmark. |
 
 Consequences worth stating out loud:
 
-- Decision 4 means the morph is a **video asset you must produce**, not something
-  I can build around a placeholder forever. Until it exists, the hero uses two
-  stills with a cross-fade, and the layout must not depend on the video's aspect
-  ratio.
+- Decision 4 was **revised**: the morph is built in code (canvas particles), not
+  generated. See `docs/hero-morph-brief.md`. There is no asset dependency and no
+  video in the critical path; the "before" image is a procedural avatar.
 - Decision 6 is the only one that touches Dev B's territory (§11).
 
 ---
@@ -86,9 +85,10 @@ Scroll budget: ~4–5 viewports of content. Every section earns its place.
 - Full-bleed **starfield** with a slow drift, plus a **horizon grid** in the
   bottom third.
 - `NEP-XXXX` eyebrow → headline → one subline → `Launch app` + `Read the NEP`.
-- **The morph**: 2021 ape JPEG on the left becomes an agent card on the right —
+- **The morph**: a procedurally generated PFP dissolves into an agent card —
   same silhouette, but the card now shows a treasury balance, an
-  `authority_epoch` and a `frozen` flag. That single image is the pitch.
+  `authority_epoch` and a `frozen` flag. Built with canvas particles, not video;
+  spec in `docs/hero-morph-brief.md`. That moment is the pitch.
 - Parallax: three layers maximum (stars, horizon, content).
 - **Stat strip** under the hero — real numbers only:
 
@@ -440,14 +440,13 @@ have zero coupling to the app.
 
 ## 13. Assets
 
-- Ape and agent-card stills must share lighting and framing, or the morph reads
-  as a cut.
-- Video: `webm` (VP9) + `mp4` fallback + `poster`. `muted playsInline preload="none"`.
-- **No GIFs.** A 3 MB GIF is ~300 KB as video.
-- `next/image` for stills (AVIF/WebP), explicit sizes to avoid CLS.
-- Total `public/` under ~6 MB.
-- Naming: `public/hero/ape-01.webp`, `public/hero/agent-01.webp`,
-  `public/loops/mint.webm`, `public/brand/logo.svg`.
+- **Nothing to download for the hero.** The avatar is drawn procedurally from a
+  seed; the morph is canvas particles. No images, no video, no poster frames.
+- The same seeded avatar generator also supplies placeholder art for dashboard
+  and market cards, so one component covers three surfaces.
+- `next/image` only for any later real art; explicit sizes to avoid CLS.
+- Keeping `public/` near-empty is a feature: the hero cannot fail to load.
+- Naming: `public/brand/logo.svg` (plus whatever the logo design needs).
 
 ---
 
@@ -479,7 +478,7 @@ app/
 
 | Slot | Deliverable | Cut if late |
 | --- | --- | --- |
-| **11 Nov** | tokens, layout shell, nav, footer, hero + starfield, stat strip | morph → two stills, cross-fade |
+| **11 Nov** | tokens, layout shell, nav, footer, hero + starfield, stat strip, code morph | morph → render at `p = 1` only |
 | **12 Nov** | statement, bento, three action rows, FAQ, mobile + reduced-motion | action rows → two |
 | **13 Nov** | app shell, HOT connect, dashboard, mint modal | market |
 | **14 Nov** | passport actions, market, polish, deploy, demo video | history |
@@ -501,9 +500,9 @@ forced to choose, the **mint modal survives and the bento dies**.
 
 ## 17. Still open
 
-1. **Hero video**: who generates it, and to what brief? Needs the ape and the
-   agent card to share a camera, a light direction, and a frame. Without that
-   spec, the two clips will not cut together.
+1. **Avatar style**: procedural cartoon mascot (Option A) or a 16×16 pixel
+   portrait (Option B)? Both are code-only; B carries less artistic risk. See
+   `docs/hero-morph-brief.md` §3.
 2. **HOT package**: confirm the current name and its testnet wallet list.
 3. **Workspace migration**: do it with Dev B, or take the `file:` shortcut?
 4. **Final copy** for the statement section and FAQ answers.

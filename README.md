@@ -7,6 +7,7 @@ A proposed NEAR-native agent NFT with a stable keyless treasury, on-chain spendi
 ## Start here
 
 - [`PLAN.md`](PLAN.md) — selected architecture, contract interfaces, safety rules, scope and seven-day delivery plan.
+- [`cli.md`](cli.md) — CLI commands (`pack`, `status`, `demo`) for bundle packing, chain inspection, and end-to-end demo verification.
 - [`HACKATHON.md`](HACKATHON.md) — supplied hackathon rules; recheck the live rules before submission.
 - [`docs/agent-standards-comparison.md`](docs/agent-standards-comparison.md) — ERC-8004 / ERC-6551 comparison and related NEAR work.
 - [`docs/agent-nft-authority-research.md`](docs/agent-nft-authority-research.md) — wallet control, revocation and provider limitations.

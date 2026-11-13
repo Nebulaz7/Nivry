@@ -156,6 +156,19 @@ body {
   }
 }
 
+/* Native disclosure: no default marker, a rotating plus instead. */
+.faq-item > summary {
+  list-style: none;
+}
+
+.faq-item > summary::-webkit-details-marker {
+  display: none;
+}
+
+.faq-item[open] .faq-marker {
+  transform: rotate(45deg);
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
@@ -167,10 +180,10 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #c9cccf;
-  border-radius: 5px;
+  background: rgba(209, 250, 229, 0.18);
+  border-radius: 0;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #959799;
+  background: rgba(209, 250, 229, 0.32);
 }

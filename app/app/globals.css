@@ -156,19 +156,6 @@ body {
   }
 }
 
-/* Native disclosure: no default marker, a rotating plus instead. */
-.faq-item > summary {
-  list-style: none;
-}
-
-.faq-item > summary::-webkit-details-marker {
-  display: none;
-}
-
-.faq-item[open] .faq-marker {
-  transform: rotate(45deg);
-}
-
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 6px;

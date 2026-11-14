@@ -3,8 +3,8 @@
 You are recording three things: **mint an agent**, **look at it**, **buy one**. That
 is the whole video. Aim for 3–4 minutes.
 
-You do not need to understand the contracts. You need a testnet wallet with a few
-NEAR in it, and the app URL from me.
+You do not need to understand the contracts. You need Node installed, a testnet
+wallet with a few NEAR in it, and this repo cloned.
 
 ---
 
@@ -18,10 +18,14 @@ NEAR in it, and the app URL from me.
    <https://docs.near.org/getting-started/faucet>
    Paste your `xxxx.testnet` account id and claim. You need at least **5 NEAR**
    (3.03 to mint, plus a listing price later).
-3. Open the app: **the URL I send you** (local: `http://localhost:3000`).
+3. Start the app on your own machine — see **Running it locally** below.
 4. Click **Connect** (top right) → pick **Meteor** → approve.
    The button turns into your shortened account id. If it does not, the wallet is
    on mainnet — switch it to Testnet and reconnect.
+
+   Use **your own new testnet account**. Do not ask for the seller's wallet. The
+   purchase demo only works between two different accounts — the contract refuses
+   to let a seller buy their own listing.
 5. Create a small text file on your desktop, e.g. `poet-prompt.txt`, containing the
    agent's instructions:
 
@@ -31,6 +35,34 @@ NEAR in it, and the app URL from me.
 
    You will upload this during minting. This is the file you were missing — the
    mint form asks for its **hash**, and the form can compute that for you.
+
+   ### Running it locally
+
+   From the repo root:
+
+   ```bash
+   cd app
+   pnpm install
+   pnpm dev
+   ```
+
+   Then open **<http://localhost:3000>**.
+
+   - **Node 20 or newer.** If `pnpm` is missing: `corepack enable`, or
+     `npm install -g pnpm`.
+   - Use `localhost`, **not** your LAN IP (`http://192.168.x.x:3000`). The file-hash
+     button needs a secure context, and plain HTTP over a LAN address is not one —
+     the hash will silently fail to fill in.
+   - If the page shows `Could not reach rpc.testnet.near.org`, create
+     `app/.env.local` with:
+
+     ```bash
+     NEXT_PUBLIC_NEAR_RPC_URL=https://test.rpc.fastnear.com
+     ```
+
+     then restart `pnpm dev`.
+   - If `pnpm dev` fails while fetching Geist from Google Fonts, your network is
+     blocking `fonts.googleapis.com`. Tell me — it is not your setup.
 
 ---
 
@@ -118,6 +150,9 @@ I will list **agent #2** on the market before you record. It will not be yours.
 | Transaction rejected: *attach exactly the published provisioning cost* | The cost changed while the form was open. Close the modal, reopen it, do not edit the amount. |
 | Faucet says you already claimed | Use a second `xxxx.testnet` account, or ask me to send you NEAR. |
 | Form refuses a field | Non-ASCII character. Emoji, curly quotes, or a backslash. Retype in plain ASCII. |
+| **Hash file** does nothing | You are not on `localhost` or `https`. Use `http://localhost:3000`. |
+| `pnpm: command not found` | `corepack enable`, or `npm install -g pnpm`. |
+| Dev server dies on a font error | Network blocks Google Fonts. Tell me; do not fight it. |
 
 ---
 

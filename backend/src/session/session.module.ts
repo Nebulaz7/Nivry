@@ -13,4 +13,3 @@ import { SessionService } from './session.service';
   exports: [SessionService, SessionAuthGuard],
 })
 export class SessionModule {}
-

@@ -9,4 +9,13 @@ export class AppController {
   getHello(): string {
     return this.appService.getHello();
   }
+
+  @Get('health')
+  getHealth() {
+    return {
+      status: 'ok',
+      service: 'nivry-backend',
+      registry_contract_id: process.env.REGISTRY_CONTRACT_ID || 'nivry.testnet',
+    };
+  }
 }

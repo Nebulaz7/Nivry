@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import {
   DatabaseService,
   type StoredTaskRow,
@@ -37,7 +37,25 @@ export class TaskRunnerService {
   private readonly fixturesRoot: string;
 
   constructor(private readonly db: DatabaseService) {
-    this.fixturesRoot = resolve(__dirname, '../../../fixtures');
+    this.fixturesRoot = this.resolveFixturesRoot();
+  }
+
+  private resolveFixturesRoot(): string {
+    if (process.env.FIXTURES_DIR) {
+      return resolve(process.env.FIXTURES_DIR);
+    }
+    const candidates = [
+      resolve(__dirname, '../../../fixtures'),
+      resolve(__dirname, '../../fixtures'),
+      resolve(process.cwd(), 'fixtures'),
+      resolve(process.cwd(), '../fixtures'),
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+    return candidates[0];
   }
 
   /**
@@ -142,7 +160,7 @@ export class TaskRunnerService {
     }
 
     const targetDir = resolve(this.fixturesRoot, subpath);
-    if (!targetDir.startsWith(this.fixturesRoot)) {
+    if (!targetDir.startsWith(this.fixturesRoot + sep)) {
       throw new BadRequestException(
         'Fixture path escapes allowlisted fixtures root',
       );

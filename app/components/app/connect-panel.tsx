@@ -22,14 +22,14 @@ export function ConnectPanel() {
   };
 
   return (
-    <section className="border border-mint/12 p-6 sm:p-8">
+    <section className="border border-line bg-panel p-6 sm:p-8">
       <p className="font-mono text-[9px] tracking-[0.22em] text-accent">
         NO SIGNER
       </p>
-      <h2 className="mt-3 text-[22px] leading-tight text-mint">
+      <h2 className="mt-3 text-[22px] leading-tight text-ink">
         Connect a wallet to mint.
       </h2>
-      <p className="mt-2 max-w-md text-[13px] leading-relaxed text-mint/45">
+      <p className="mt-2 max-w-md text-[13px] leading-relaxed text-dim">
         Every agent on this page is live on testnet. Minting, listing and buying
         need an account to sign for them.
       </p>
@@ -44,7 +44,7 @@ export function ConnectPanel() {
       </button>
 
       {error ? (
-        <p className="mt-4 font-mono text-[11px] text-mint/60">{error}</p>
+        <p className="mt-4 font-mono text-[11px] text-clay">{error}</p>
       ) : null}
     </section>
   );

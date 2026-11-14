@@ -24,6 +24,21 @@ export function formatNear(yocto: string | bigint, decimals = 2): string {
   return `${whole}.${fraction}`;
 }
 
+/** `"3.05"` → `"3050000000000000000000000"`. `null` when malformed or zero. */
+export function parseNear(input: string): string | null {
+  const trimmed = input.trim();
+  if (!/^\d+(\.\d*)?$/.test(trimmed)) return null;
+
+  const [whole, fraction = ""] = trimmed.split(".");
+  if (fraction.length > 24) return null;
+
+  const yocto =
+    BigInt(whole || "0") * YOCTO_PER_NEAR +
+    BigInt(fraction.padEnd(24, "0") || "0");
+
+  return yocto > BigInt(0) ? yocto.toString() : null;
+}
+
 /** `"3.03 NEAR"`. */
 export function formatNearAmount(yocto: string | bigint, decimals = 2): string {
   return `${formatNear(yocto, decimals)} NEAR`;

@@ -47,7 +47,7 @@ export function Sigil({ seed, size = 40 }: { seed: string; size?: number }) {
   return (
     <span
       aria-hidden
-      className="flex shrink-0 items-center justify-center border border-mint/15 text-accent/70"
+      className="flex shrink-0 items-center justify-center border border-line text-accent/70 transition-colors group-hover:border-accent/40 group-hover:text-accent"
       style={{ width: size, height: size }}
     >
       <svg

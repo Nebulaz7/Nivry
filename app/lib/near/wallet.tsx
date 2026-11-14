@@ -29,6 +29,8 @@ interface WalletContextValue {
   disconnect: () => Promise<void>;
   /** Resolves with the wallet's execution outcome; callers narrow what they read. */
   signAndSend: (call: ContractCall) => Promise<unknown>;
+  /** Plain NEAR transfer, e.g. topping up an agent treasury. */
+  sendTransfer: (receiverId: string, deposit: string) => Promise<unknown>;
 }
 
 const WalletContext = createContext<WalletContextValue | null>(null);
@@ -136,9 +138,32 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const sendTransfer = useCallback(async (receiverId: string, deposit: string) => {
+    const connector = connectorRef.current ?? (await loadConnector());
+    const { wallet, accounts } = await connector.getConnectedWallet();
+
+    if (accounts.length === 0) {
+      throw new Error("Connect a wallet before signing.");
+    }
+
+    return wallet.signAndSendTransaction({
+      signerId: accounts[0].accountId,
+      receiverId,
+      actions: [{ type: "Transfer", params: { deposit } }],
+    });
+  }, []);
+
   const value = useMemo(
-    () => ({ accountId, connecting, ready, connect, disconnect, signAndSend }),
-    [accountId, connecting, ready, connect, disconnect, signAndSend],
+    () => ({
+      accountId,
+      connecting,
+      ready,
+      connect,
+      disconnect,
+      signAndSend,
+      sendTransfer,
+    }),
+    [accountId, connecting, ready, connect, disconnect, signAndSend, sendTransfer],
   );
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;

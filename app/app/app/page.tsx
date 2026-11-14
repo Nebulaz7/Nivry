@@ -95,7 +95,7 @@ export default function DashboardPage() {
           <p className="font-mono text-[9px] tracking-[0.24em] text-accent">
             REGISTRY
           </p>
-          <h1 className="mt-2 text-[30px] leading-none text-mint">Agents</h1>
+          <h1 className="mt-2 text-[30px] leading-none text-ink">Agents</h1>
         </div>
 
         {accountId ? (
@@ -118,7 +118,7 @@ export default function DashboardPage() {
         )}
       </header>
 
-      <div className="mt-8 grid grid-cols-2 gap-y-4 border-y border-mint/15 py-2 sm:grid-cols-4">
+      <div className="mt-8 grid grid-cols-2 gap-y-4 border-y border-line py-2 sm:grid-cols-4">
         <Stat
           label="AGENTS"
           value={loading && !page ? "—" : formatCount(page?.total ?? 0)}
@@ -154,8 +154,8 @@ export default function DashboardPage() {
       ) : null}
 
       {error ? (
-        <div className="mt-8 flex flex-wrap items-center justify-between gap-3 border border-mint/15 px-4 py-3">
-          <p className="font-mono text-[11px] leading-relaxed text-mint/60">
+        <div className="mt-8 flex flex-wrap items-center justify-between gap-3 border border-clay/30 px-4 py-3">
+          <p className="font-mono text-[11px] leading-relaxed text-clay">
             {error}
           </p>
           <button
@@ -170,13 +170,13 @@ export default function DashboardPage() {
 
       <section className="mt-12">
         <div className="flex items-center justify-between gap-4">
-          <h2 className="font-mono text-[9px] tracking-[0.22em] text-mint/35">
+          <h2 className="font-mono text-[9px] tracking-[0.22em] text-dim">
             ALL AGENTS
           </h2>
           <button
             type="button"
             onClick={refresh}
-            className="font-mono text-[9px] tracking-[0.16em] text-mint/35 transition-colors hover:text-accent"
+            className="font-mono text-[9px] tracking-[0.16em] text-dim transition-colors hover:text-accent"
           >
             REFRESH
           </button>
@@ -185,8 +185,8 @@ export default function DashboardPage() {
         {loading && !page ? <SkeletonGrid /> : null}
 
         {!loading && agents.length === 0 ? (
-          <div className="mt-4 border border-dashed border-mint/15 px-5 py-10 text-center">
-            <p className="text-[13px] text-mint/40">No agents yet.</p>
+          <div className="mt-4 border border-dashed border-line px-5 py-10 text-center">
+            <p className="text-[13px] text-dim">No agents yet.</p>
           </div>
         ) : null}
 
@@ -203,7 +203,7 @@ export default function DashboardPage() {
         ) : null}
 
         {page?.truncated ? (
-          <p className="mt-4 font-mono text-[10px] text-mint/30">
+          <p className="mt-4 font-mono text-[10px] text-dim/80">
             Showing the newest {formatCount(agents.length)} of{" "}
             {formatCount(page.total)}.
           </p>
@@ -225,7 +225,7 @@ function SkeletonGrid() {
       {[0, 1, 2].map((key) => (
         <div
           key={key}
-          className="h-[172px] animate-pulse border border-mint/10 bg-mint/[0.03]"
+          className="h-[172px] animate-pulse border border-line bg-panel"
         />
       ))}
     </div>

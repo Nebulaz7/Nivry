@@ -73,7 +73,7 @@ export function ProvisioningCard({
   const lifecycle = info?.lifecycle ?? "provisioning";
 
   return (
-    <div className="border border-accent/30 p-5">
+    <div className="border border-accent/30 bg-panel p-5">
       <div className="flex items-center justify-between gap-3">
         <p className="font-mono text-[9px] tracking-[0.22em] text-accent">
           RESERVED #{formatTokenId(tokenId)}
@@ -81,19 +81,19 @@ export function ProvisioningCard({
         <LifecycleBadge lifecycle={lifecycle} />
       </div>
 
-      <h3 className="mt-3 truncate text-[15px] text-mint">{name}</h3>
-      <p className="mt-2 max-w-lg text-[12px] leading-relaxed text-mint/40">
+      <h3 className="mt-3 truncate text-[15px] text-ink">{name}</h3>
+      <p className="mt-2 max-w-lg text-[12px] leading-relaxed text-dim">
         {COPY[lifecycle]}
       </p>
 
       {lifecycle === "provisioning" ? (
-        <div className="mt-4 h-px w-full overflow-hidden bg-mint/10">
+        <div className="mt-4 h-px w-full overflow-hidden bg-line">
           <div className="h-px w-1/3 animate-pulse bg-accent" />
         </div>
       ) : null}
 
       {balance ? (
-        <p className="mt-3 font-mono text-[10px] text-mint/50">
+        <p className="mt-3 font-mono text-[10px] text-dim">
           TREASURY {formatNearAmount(balance)}
         </p>
       ) : null}

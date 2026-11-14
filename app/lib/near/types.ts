@@ -79,6 +79,13 @@ export interface AgentInfo {
   manifest_hash: string;
 }
 
+export interface SellerCreditView {
+  account_id: string;
+  available_yocto: Yocto;
+  reserved_yocto: Yocto;
+  pending_withdrawal_operation_id: string | null;
+}
+
 export interface OperationView {
   operation_id: string;
   sequence: number;

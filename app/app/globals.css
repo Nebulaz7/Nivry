@@ -5,6 +5,17 @@
   --color-accent: #34d399;
   --color-mint: #d1fae5;
 
+  /* App surfaces. Solid tones only: the dashboard sits on a near-black green so
+     body text clears the landing page's saturation, and two muted accents carry
+     state without glowing. */
+  --color-canvas: #07130f;
+  --color-panel: #0b1d16;
+  --color-line: #16382c;
+  --color-ink: #e8fdf4;
+  --color-dim: #8aa89d;
+  --color-sand: #e9b872;
+  --color-clay: #e29b9b;
+
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, monospace;
 }

@@ -11,7 +11,7 @@ import { SITE } from "@/lib/site";
 
 import { RpcError } from "./rpc";
 import { viewBatch, viewCall, viewCallSafe } from "./rpc";
-import type { AgentInfo, Lifecycle, TreasuryInfo } from "./types";
+import type { AgentInfo, Lifecycle, SellerCreditView, TreasuryInfo } from "./types";
 
 export const REGISTRY_ID = SITE.registry;
 
@@ -58,6 +58,13 @@ export function getWalletCodeHash(): Promise<string> {
 
 export function getTreasuryInfo(accountId: string): Promise<TreasuryInfo> {
   return viewCall<TreasuryInfo>(accountId, "treasury_info");
+}
+
+/** Sale proceeds the registry owes an account. Never treasury funds. */
+export function getSellerCredit(accountId: string): Promise<SellerCreditView> {
+  return viewCall<SellerCreditView>(REGISTRY_ID, "seller_credit", {
+    account_id: accountId,
+  });
 }
 
 export async function getOwnedTokenIds(accountId: string): Promise<string[]> {

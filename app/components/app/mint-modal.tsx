@@ -58,7 +58,7 @@ const PROVISION_COPY: Record<Lifecycle, string> = {
 };
 
 const INPUT =
-  "w-full border border-mint/15 bg-transparent px-3 py-2 font-mono text-[12px] text-mint placeholder:text-mint/20 transition-colors focus:border-accent focus:outline-none";
+  "w-full border border-line bg-transparent px-3 py-2 font-mono text-[12px] text-ink placeholder:text-dim/50 transition-colors focus:border-accent focus:outline-none";
 
 interface MintModalProps {
   open: boolean;
@@ -271,9 +271,9 @@ function MintDialog({
         aria-modal="true"
         aria-labelledby="mint-title"
         onClick={(event) => event.stopPropagation()}
-        className="my-auto w-full max-w-2xl border border-accent/35 bg-void shadow-[0_30px_80px_-20px_rgba(0,0,0,0.9)]"
+        className="my-auto w-full max-w-2xl border border-accent/35 bg-panel shadow-[0_30px_80px_-20px_rgba(0,0,0,0.9)]"
       >
-        <header className="flex items-start justify-between gap-4 border-b border-mint/10 px-5 py-4 sm:px-6">
+        <header className="flex items-start justify-between gap-4 border-b border-line px-5 py-4 sm:px-6">
           <div>
             <h2
               id="mint-title"
@@ -281,7 +281,7 @@ function MintDialog({
             >
               MINT AGENT
             </h2>
-            <p className="mt-1.5 font-mono text-[10px] tracking-[0.14em] text-mint/35">
+            <p className="mt-1.5 font-mono text-[10px] tracking-[0.14em] text-dim">
               {STEP_LABEL[step]}
             </p>
           </div>
@@ -290,7 +290,7 @@ function MintDialog({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="-mr-1 -mt-1 p-2 font-mono text-[14px] leading-none text-mint/40 transition-colors hover:text-mint"
+            className="-mr-1 -mt-1 p-2 font-mono text-[14px] leading-none text-dim transition-colors hover:text-ink"
           >
             ✕
           </button>
@@ -325,7 +325,7 @@ function MintDialog({
                       key={hint}
                       type="button"
                       onClick={() => update("runtime_hint")(hint)}
-                      className="border border-mint/15 px-1.5 py-0.5 font-mono text-[9px] tracking-[0.12em] text-mint/40 transition-colors hover:border-accent/50 hover:text-accent"
+                      className="border border-line px-1.5 py-0.5 font-mono text-[9px] tracking-[0.12em] text-dim transition-colors hover:border-accent/50 hover:text-accent"
                     >
                       {hint.toUpperCase()}
                     </button>
@@ -408,9 +408,9 @@ function MintDialog({
                 </Field>
               </div>
 
-              <div className="border border-mint/12 p-3 sm:col-span-2">
+              <div className="border border-line p-3 sm:col-span-2">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="font-mono text-[9px] tracking-[0.18em] text-mint/35">
+                  <span className="font-mono text-[9px] tracking-[0.18em] text-dim">
                     MANIFEST HASH
                   </span>
                   <span className="font-mono text-[10px] text-accent/80">
@@ -422,7 +422,7 @@ function MintDialog({
                   </span>
                 </div>
                 {canonical ? (
-                  <pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] leading-relaxed text-mint/25">
+                  <pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] leading-relaxed text-dim/70">
                     {canonical}
                   </pre>
                 ) : null}
@@ -432,7 +432,7 @@ function MintDialog({
 
           {step === "review" ? (
             <div>
-              <dl className="divide-y divide-mint/10 border border-mint/12">
+              <dl className="divide-y divide-line border border-line">
                 <Row label="NAME" value={draft.name} />
                 <Row label="RUNTIME" value={draft.runtime_hint} />
                 <Row label="TASK" value={draft.task_kind} />
@@ -443,14 +443,14 @@ function MintDialog({
 
               <div className="mt-4 grid gap-4 border border-accent/25 p-4 sm:grid-cols-2">
                 <div>
-                  <p className="font-mono text-[9px] tracking-[0.18em] text-mint/35">
+                  <p className="font-mono text-[9px] tracking-[0.18em] text-dim">
                     ATTACHED DEPOSIT
                   </p>
-                  <p className="mt-1.5 font-mono text-[22px] leading-none text-mint">
+                  <p className="mt-1.5 font-mono text-[22px] leading-none text-ink">
                     {cost ? `${formatNear(cost)} NEAR` : "—"}
                   </p>
                 </div>
-                <div className="font-mono text-[10px] leading-relaxed text-mint/35">
+                <div className="font-mono text-[10px] leading-relaxed text-dim">
                   <p>3.00 NEAR treasury stake</p>
                   <p>
                     {storageShare
@@ -460,7 +460,7 @@ function MintDialog({
                 </div>
               </div>
 
-              <p className="mt-3 font-mono text-[10px] leading-relaxed text-mint/30">
+              <p className="mt-3 font-mono text-[10px] leading-relaxed text-dim/80">
                 Exact deposit, read live from provisioning_cost(). The treasury is
                 created without a key.
               </p>
@@ -472,7 +472,7 @@ function MintDialog({
               <p className="font-mono text-[11px] tracking-[0.16em] text-accent">
                 WAITING FOR SIGNATURE
               </p>
-              <p className="mt-3 text-[13px] text-mint/40">
+              <p className="mt-3 text-[13px] text-dim">
                 Approve the transaction in your wallet.
               </p>
             </div>
@@ -487,34 +487,34 @@ function MintDialog({
                 <LifecycleBadge lifecycle={lifecycle ?? "provisioning"} />
               </div>
 
-              <p className="mt-3 font-mono text-[40px] leading-none text-mint">
+              <p className="mt-3 font-mono text-[40px] leading-none text-ink">
                 #{formatTokenId(reserved.tokenId)}
               </p>
 
-              <p className="mt-4 max-w-md text-[13px] leading-relaxed text-mint/45">
+              <p className="mt-4 max-w-md text-[13px] leading-relaxed text-dim">
                 {PROVISION_COPY[lifecycle ?? "provisioning"]}
               </p>
 
               {balance ? (
-                <p className="mt-4 font-mono text-[10px] tracking-[0.14em] text-mint/50">
+                <p className="mt-4 font-mono text-[10px] tracking-[0.14em] text-dim">
                   TREASURY {formatNear(balance)} NEAR
                 </p>
               ) : null}
 
-              <p className="mt-6 font-mono text-[10px] text-mint/25">
+              <p className="mt-6 font-mono text-[10px] text-dim/70">
                 Closing this keeps the tracker running on the dashboard.
               </p>
             </div>
           ) : null}
 
           {error ? (
-            <p className="mt-4 border border-mint/15 px-3 py-2 font-mono text-[11px] leading-relaxed text-mint/70">
+            <p className="mt-4 border border-line px-3 py-2 font-mono text-[11px] leading-relaxed text-ink/85">
               {error}
             </p>
           ) : null}
         </div>
 
-        <footer className="flex items-center justify-between gap-3 border-t border-mint/10 px-5 py-4 sm:px-6">
+        <footer className="flex items-center justify-between gap-3 border-t border-line px-5 py-4 sm:px-6">
           <button
             type="button"
             onClick={() => setStep("manifest")}
@@ -580,17 +580,17 @@ function Field({
     <div>
       <label
         htmlFor={id}
-        className="mb-1.5 block font-mono text-[9px] tracking-[0.18em] text-mint/40"
+        className="mb-1.5 block font-mono text-[9px] tracking-[0.18em] text-dim"
       >
         {label}
       </label>
       {children}
       {error ? (
-        <p className="mt-1.5 font-mono text-[10px] leading-relaxed text-mint/60">
+        <p className="mt-1.5 font-mono text-[10px] leading-relaxed text-ink/70">
           {error}
         </p>
       ) : hint ? (
-        <p className="mt-1.5 font-mono text-[10px] leading-relaxed text-mint/25">
+        <p className="mt-1.5 font-mono text-[10px] leading-relaxed text-dim/70">
           {hint}
         </p>
       ) : null}
@@ -601,10 +601,10 @@ function Field({
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-start justify-between gap-4 px-3 py-2.5">
-      <dt className="shrink-0 font-mono text-[9px] tracking-[0.18em] text-mint/35">
+      <dt className="shrink-0 font-mono text-[9px] tracking-[0.18em] text-dim">
         {label}
       </dt>
-      <dd className="truncate font-mono text-[11px] text-mint/75">{value}</dd>
+      <dd className="truncate font-mono text-[11px] text-ink">{value}</dd>
     </div>
   );
 }

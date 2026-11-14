@@ -1,7 +1,7 @@
 export const SITE = {
   name: "Nivry",
   /** Single source of truth for the standard number. */
-  nep: "NEP-XXXX",
+  nep: "NEP-669",
   headline: "Mint an agent that holds its own money.",
   subline:
     "One NEP-171 token owns the agent's identity and its treasury. Budget what it can spend, revoke it in a single call, and sell it with the balance and history intact.",
@@ -22,8 +22,8 @@ export const SITE = {
   agentName: "Docs Reporter",
   balance: "3.00 NEAR",
   github: "https://github.com/Nebulaz7/Nivry",
-  /** Replace with the real NEP pull request once it exists. */
-  nepPr: "https://github.com/near/NEPs/pulls",
+  /** The draft NEP pull request. */
+  nepPr: "https://github.com/near/NEPs/pull/669",
   /** Review stage: 0 draft, 1 discussion, 2 pull request, 3 review, 4 accepted. */
-  nepStage: 1,
+  nepStage: 2,
 } as const;

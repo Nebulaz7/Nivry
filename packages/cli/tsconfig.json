@@ -3,7 +3,11 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "typeRoots": ["../../backend/node_modules/@types"],
+    "typeRoots": [
+      "./node_modules/@types",
+      "../../node_modules/@types",
+      "../../backend/node_modules/@types"
+    ],
     "declaration": true,
     "sourceMap": true,
     "outDir": "./dist",

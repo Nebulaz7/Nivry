@@ -118,6 +118,33 @@ export function withdrawSaleProceeds(amountYocto: string): ContractCall {
   };
 }
 
+/**
+ * Purchase a listed agent.
+ *
+ * `expected_version` and `expected_manifest_hash` are the buyer's receipt that
+ * the state they inspected is the state they are paying for; the contract aborts
+ * if either moved.
+ */
+export function buyAgent(
+  tokenId: string,
+  listingId: number,
+  expectedVersion: number,
+  expectedManifestHash: string,
+  priceYocto: string,
+): ContractCall {
+  return {
+    receiverId: REGISTRY_ID,
+    methodName: "buy_agent",
+    args: {
+      token_id: tokenId,
+      listing_id: listingId,
+      expected_version: expectedVersion,
+      expected_manifest_hash: expectedManifestHash,
+    },
+    deposit: priceYocto,
+  };
+}
+
 export function transferTitle(tokenId: string, receiverId: string): ContractCall {
   return {
     receiverId: REGISTRY_ID,

@@ -2,6 +2,10 @@ import { Suspense } from "react";
 
 import { Passport } from "@/components/app/passport";
 
+/** The passport reads live chain state for an arbitrary token id, so there is no
+ * useful static shell to serve — allowing the route to block is honest. */
+export const instant = false;
+
 /** `params` is a promise under Cache Components; awaiting it inside Suspense
  * keeps the route shell prerenderable. */
 async function PassportRoute({
